@@ -7,8 +7,10 @@ internal sealed class MainWindow : Form
     private readonly TransferLog transfers = new();
     private readonly Button signIn = DarkTheme.Button("Sign out");
     private readonly Button upload = DarkTheme.Button("Upload to SURF  →", primary: true);
-    private readonly Button download = DarkTheme.Button("←  Download to Windows", primary: true);
-    private readonly Button probe = DarkTheme.Button("Test upload");
+    private readonly Button download = DarkTheme.Button("← Download", primary: true);
+    private readonly Button restore = DarkTheme.Button("Restore from tape");
+    private readonly Button package = DarkTheme.Button("Archive to SURF…");
+    private readonly Button resume = DarkTheme.Button("Resume archive upload…");
     private readonly Button removeWindows = DarkTheme.Button("Remove…");
     private readonly Button removeSurf = DarkTheme.Button("Remove…");
     private readonly Button newFolder = DarkTheme.Button("+ New folder");
@@ -17,6 +19,7 @@ internal sealed class MainWindow : Form
     private ArchiveSession? archive;
     private CancellationTokenSource? operation;
     private CancellationTokenSource? statusLookup;
+    private readonly Dictionary<string, (TransferJob Job, CancellationTokenSource Cancellation)> restores = new(StringComparer.Ordinal);
     private bool transferring;
     private bool closeWhenIdle;
 
@@ -45,18 +48,22 @@ internal sealed class MainWindow : Form
         signIn.Click += async (_, _) => await Run(ToggleLogin);
         upload.Click += async (_, _) => await Run(token => Copy(toSurf: true, token), transfer: true);
         download.Click += async (_, _) => await Run(token => Copy(toSurf: false, token), transfer: true);
-        probe.Click += async (_, _) => await RunProbe();
+        restore.Click += (_, _) => StartRestores();
+        package.Click += async (_, _) => await ArchiveSelected();
+        resume.Click += async (_, _) => await ResumeArchive();
         removeWindows.Click += async (_, _) => await ConfirmRemoval(local: true);
         removeSurf.Click += async (_, _) => await ConfirmRemoval(local: false);
         removeWindows.AccessibleName = "Remove selected Windows items";
         removeSurf.AccessibleName = "Remove selected SURF items";
         newFolder.Click += async (_, _) => await Run(MakeFolder);
         transfers.CancelRequested += CancelTransfer;
+        transfers.SelectionChanged += UpdateControls;
         Shown += async (_, _) => await Run(InitialLoad);
         FormClosing += OnClosing;
         FormClosed += (_, _) =>
         {
             StopStatusLookup();
+            StopRestores();
             archive?.Dispose();
         };
         UpdateControls();
@@ -65,20 +72,19 @@ internal sealed class MainWindow : Form
     private void BuildLayout()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
-        foreach (int height in new[] { 58, -1, 43, 230, 25 })
+        foreach (int height in new[] { 46, -1, 43, 246, 25 })
             layout.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
         Controls.Add(layout);
 
         var header = new TableLayoutPanel
         {
             Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = DarkTheme.Panel,
-            Padding = new Padding(15, 10, 12, 7), Margin = new Padding(0, 0, 0, 3)
+            Padding = new Padding(15, 5, 12, 3), Margin = new Padding(0, 0, 0, 3)
         };
         header.ColumnStyles.Add(new(SizeType.Percent, 100));
         header.ColumnStyles.Add(new(SizeType.AutoSize));
         header.ColumnStyles.Add(new(SizeType.AutoSize));
-        header.Controls.Add(DarkTheme.Row(DarkTheme.Label("▣", DarkTheme.Brand, DarkTheme.Mint),
-            DarkTheme.Label("  SURF Data Archive", DarkTheme.Brand)), 0, 0);
+        header.Controls.Add(DarkTheme.Row(resume), 0, 0);
         connection.Margin = new Padding(0, 7, 17, 0);
         header.Controls.Add(connection, 1, 0);
         header.Controls.Add(signIn, 2, 0);
@@ -97,8 +103,8 @@ internal sealed class MainWindow : Form
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(13, 5, 13, 1) };
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
-        actions.Controls.Add(DarkTheme.Row(upload, probe, removeWindows), 0, 0);
-        actions.Controls.Add(DarkTheme.Row(download, newFolder, removeSurf), 1, 0);
+        actions.Controls.Add(DarkTheme.Row(upload, package, removeWindows), 0, 0);
+        actions.Controls.Add(DarkTheme.Row(download, restore, newFolder, removeSurf), 1, 0);
         layout.Controls.Add(actions, 0, 2);
 
         transfers.Margin = new Padding(13, 0, 13, 0);
@@ -233,7 +239,10 @@ internal sealed class MainWindow : Form
         {
             var states = await Task.Run(() => session.ReadStatuses(path, entries, lookup.Token));
             if (statusLookup == lookup && surf.PathShown == path)
+            {
                 surf.ApplyStatuses(states, finish: true);
+                UpdateControls();
+            }
         }
         catch (OperationCanceledException) when (lookup.IsCancellationRequested) { }
         catch (Exception error)
@@ -242,6 +251,7 @@ internal sealed class MainWindow : Form
             {
                 surf.ApplyStatuses(new Dictionary<string, ArchiveState>(), finish: true);
                 transfers.Log("Could not load archive statuses. " + error.Message);
+                UpdateControls();
             }
         }
         finally
@@ -256,6 +266,7 @@ internal sealed class MainWindow : Form
         if (archive is not null)
         {
             StopStatusLookup();
+            StopRestores();
             var currentArchive = archive;
             archive = null;
             surf.SetHistory(null);
@@ -308,15 +319,16 @@ internal sealed class MainWindow : Form
                 if (toSurf)
                     await Task.Run(() => archive!.Upload(source, target.PathShown, progress, token));
                 else
-                    await Task.Run(() => archive!.Download(source, target.PathShown, progress,
-                        update => Invoke(() => ShowRestore(update, job)), token));
+                {
+                    job.SetPhase(TransferState.CheckingStatus);
+                    await Task.Run(() => archive!.Download(source, target.PathShown, progress, token));
+                }
                 transfers.Log("Copy complete. File size verified.", job);
                 transfers.Finish(job, TransferState.Completed);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                transfers.Log(toSurf ? "Transfer cancelled."
-                    : "Download cancelled. A restore already requested on SURF may still finish.", job);
+                transfers.Log("Transfer cancelled.", job);
                 transfers.Finish(job, TransferState.Cancelled);
                 throw;
             }
@@ -335,47 +347,198 @@ internal sealed class MainWindow : Form
         SetFeedback(failures == 0 ? "Transfer complete." : $"{failures:N0} transfer(s) failed. See the transfer log.", failures > 0);
     }
 
-    private void ShowRestore(RestoreUpdate update, TransferJob job)
+    private void StartRestores()
     {
-        job.SetPhase(update.Phase);
-        transfers.Log(update.Message, job);
-        if (update.State is { } state)
-            surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
+        string directory = surf.PathShown;
+        foreach (var item in surf.SelectedFiles.Where(item => ArchiveStatus.CanRestore(item.Status)))
+        {
+            string path = ArchiveSession.Child(directory, item.Name);
+            if (restores.ContainsKey(path))
+                continue;
+            var job = new TransferJob(item.Name, "Tape restore", path, "SURF disk", 0, tape: true);
+            var cancellation = new CancellationTokenSource();
+            restores.Add(path, (job, cancellation));
+            transfers.Add(job);
+            _ = MonitorRestore(archive!, directory, path, job, cancellation);
+        }
+        UpdateControls();
     }
 
-    private async Task RunProbe()
+    private async Task MonitorRestore(ArchiveSession session, string directory, string path, TransferJob job,
+        CancellationTokenSource cancellation)
     {
-        var entry = windows.SelectedFiles.Single();
-        string source = Path.Combine(windows.PathShown, entry.Name);
-        if (MessageBox.Show(this, $"Upload temporarily, verify and remove the test copy from SURF?\n\n{entry.Name}",
-            "Test upload", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
-            return;
-
-        await Run(async token =>
+        var progress = new Progress<RestoreUpdate>(update =>
         {
-            var job = new TransferJob(entry.Name, "Test upload", source, archive!.Root, entry.Size);
-            transfers.Add(job);
-            try
+            if (IsDisposed || cancellation.IsCancellationRequested ||
+                !restores.TryGetValue(path, out var current) || current.Job != job)
+                return;
+            job.SetPhase(update.Phase);
+            transfers.Log(update.Message, job);
+            if (surf.PathShown == directory && update.State is { } state)
             {
-                await Task.Run(() => archive.VerifyUpload(source, new Callback<TransferProgress>(job.Report),
-                    line => Invoke(() => transfers.Log(line, job)), token));
-                transfers.Finish(job, TransferState.Completed);
-                SetFeedback("Test upload verified and removed.");
+                surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
+                UpdateControls();
             }
-            catch (OperationCanceledException) when (token.IsCancellationRequested)
+        });
+        try
+        {
+            var state = await Task.Run(() => session.MonitorRestore(path, ((IProgress<RestoreUpdate>)progress).Report, cancellation.Token));
+            if (!IsDisposed)
             {
-                transfers.Log("Test upload cancelled.", job);
+                if (!cancellation.IsCancellationRequested && surf.PathShown == directory)
+                    surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
+                transfers.Log("Ready. Select the file and click Download when you want to copy it to Windows.", job);
+                transfers.Finish(job, TransferState.Ready);
+            }
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (!IsDisposed)
+            {
+                transfers.Log("Monitoring stopped. A restore already requested on SURF may still finish.", job);
                 transfers.Finish(job, TransferState.Cancelled);
-                throw;
             }
-            catch (Exception error)
+        }
+        catch (Exception error)
+        {
+            if (!IsDisposed)
             {
                 transfers.Log(error.Message, job);
                 transfers.Finish(job, TransferState.Failed);
-                throw;
             }
+        }
+        finally
+        {
+            if (restores.TryGetValue(path, out var current) && current.Job == job)
+                restores.Remove(path);
+            cancellation.Dispose();
+            if (!IsDisposed)
+                UpdateControls();
+        }
+    }
+
+    private void StopRestores()
+    {
+        foreach (var item in restores.Values)
+            item.Cancellation.Cancel();
+        restores.Clear();
+    }
+
+    private async Task ArchiveSelected()
+    {
+        var selection = windows.SelectedItems;
+        string source = windows.PathShown;
+        string destination = surf.PathShown;
+
+        await Run(async token =>
+        {
+            SetFeedback("Scanning selected data and checking staging space…");
+            var plan = await Task.Run(() => PackagePlan.Create(source, selection, token));
+            string name = ArchivePackage.NewName();
+            string recovery = Path.Combine(plan.StagingParent, name);
+            string remote = ArchiveSession.Child(destination, name);
+            if (!PackageDialog.Confirm(this, plan, selection, recovery, remote))
+            {
+                SetFeedback("");
+                return;
+            }
+
+            await RunPackage(name, recovery, remote, (target, progress) =>
+                ArchivePackage.Create(plan, name, destination, target, progress, token), token);
+            await NavigateLocal(source, null);
+            await NavigateRemote(destination, null);
+            SetFeedback("Archive uploaded and verified. Local archive parts removed.");
         }, transfer: true);
     }
+
+    private async Task ResumeArchive()
+    {
+        using var picker = new FolderBrowserDialog
+        {
+            Description = "Select the local SURF package folder containing package.json.",
+            UseDescriptionForTitle = true, ShowNewFolderButton = false, SelectedPath = windows.PathShown
+        };
+        if (picker.ShowDialog(this) != DialogResult.OK)
+            return;
+        string folder = picker.SelectedPath;
+        await Run(async token =>
+        {
+            var manifest = await Task.Run(() => ArchivePackage.ReadManifest(folder));
+            string remote = ArchiveSession.Child(manifest.Destination, manifest.Name);
+            if (MessageBox.Show(this,
+                $"Resume uploading to:\n{remote}\n\nLocal TAR parts will be removed after every SURF checksum matches.",
+                "Resume archive upload", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.OK)
+            {
+                SetFeedback("");
+                return;
+            }
+            await RunPackage(manifest.Name, folder, remote, (target, progress) =>
+                ArchivePackage.Resume(folder, target, progress, token), token);
+            if (surf.HasFolder)
+                await NavigateRemote(surf.PathShown, null);
+            SetFeedback("Archive upload verified. Remaining local archive parts removed.");
+        }, transfer: true);
+    }
+
+    private async Task RunPackage(string name, string recovery, string destination,
+        Func<IPackageDestination, Action<PackageMeter>, Task> run, CancellationToken token)
+    {
+        var stages = new Dictionary<PackageStep, TransferJob>();
+        var gate = new object();
+        SetFeedback("Preparing archive destination…");
+        try
+        {
+            await Task.Run(async () =>
+            {
+                using var target = archive!.PackageTarget();
+                await run(target, Report);
+            });
+        }
+        catch (Exception error)
+        {
+            bool cancelled = error is OperationCanceledException && token.IsCancellationRequested;
+            string message = Directory.Exists(recovery) ? $"Local package folder kept: {recovery}" : "No package folder was created.";
+            foreach (var stage in stages.Values)
+            {
+                transfers.Log(message, stage);
+                transfers.Finish(stage, cancelled ? TransferState.Cancelled : TransferState.Failed);
+            }
+            transfers.Log(message);
+            if (cancelled)
+                throw;
+            throw new IOException($"{error.Message} {message}", error);
+        }
+
+        void Report(PackageMeter meter)
+        {
+            lock (gate)
+            {
+                if (!stages.TryGetValue(meter.Step, out var job))
+                {
+                    job = new TransferJob(name, StepCaption(meter.Step), recovery, destination, meter.Total, meter.CountItems);
+                    stages.Add(meter.Step, job);
+                    Invoke(() => transfers.Add(job));
+                }
+                job.Report(new(name, meter.Done, meter.Total));
+                if (meter.Finished)
+                {
+                    Invoke(() => transfers.Finish(job, TransferState.Completed));
+                    stages.Remove(meter.Step);
+                }
+            }
+        }
+    }
+
+    private static string StepCaption(PackageStep step) => step switch
+    {
+        PackageStep.Archive => "Pack TAR",
+        PackageStep.Verify => "Verify local TAR",
+        PackageStep.RemoveOriginals => "Remove originals",
+        PackageStep.Upload => "Upload parts",
+        PackageStep.RemoteSha => "SURF SHA-256",
+        _ => "Remove local parts"
+    };
 
     private async Task ConfirmRemoval(bool local)
     {
@@ -466,7 +629,7 @@ internal sealed class MainWindow : Form
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
-            SetFeedback("Transfer cancelled.");
+            SetFeedback("Activity cancelled.");
         }
         catch (Exception error)
         {
@@ -485,11 +648,18 @@ internal sealed class MainWindow : Form
 
     private void CancelTransfer()
     {
+        if (operation is null && transfers.SelectedJob is { Tape: true } job)
+        {
+            foreach (var item in restores.Values.Where(item => item.Job == job))
+                item.Cancellation.Cancel();
+            UpdateControls();
+            return;
+        }
         if (operation is null || !transferring)
             return;
         operation.Cancel();
         UpdateControls();
-        SetFeedback("Cancelling transfer and cleaning up temporary files…");
+        SetFeedback("Cancelling activity…");
     }
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
@@ -512,12 +682,20 @@ internal sealed class MainWindow : Form
         windows.SetAvailable(idle, windows.HasFolder);
         surf.SetAvailable(idle, online && surf.HasFolder);
         upload.Enabled = idle && surf.HasFolder && windows.SelectedFiles.Count > 0;
-        download.Enabled = idle && windows.HasFolder && surf.SelectedFiles.Count > 0;
-        probe.Enabled = idle && online && windows.SelectedFiles.Count == 1;
+        var selected = surf.SelectedFiles;
+        download.Enabled = idle && online && windows.HasFolder && selected.Count > 0 &&
+            selected.All(item => ArchiveStatus.IsOnDisk(item.Status));
+        restore.Enabled = idle && online && selected.Any(item => ArchiveStatus.CanRestore(item.Status)
+            && !restores.ContainsKey(ArchiveSession.Child(surf.PathShown, item.Name)));
+        package.Enabled = idle && online && surf.HasFolder && windows.SelectedItems.Count > 0;
+        resume.Enabled = idle && online;
         removeWindows.Enabled = idle && windows.SelectedItems.Count > 0;
         removeSurf.Enabled = idle && online && surf.SelectedItems.Count > 0;
         newFolder.Enabled = idle && surf.HasFolder;
-        transfers.SetCancelEnabled(transferring && operation is { IsCancellationRequested: false });
+        bool monitoring = idle && transfers.SelectedJob is { Tape: true } job &&
+            restores.Values.Any(item => item.Job == job && !item.Cancellation.IsCancellationRequested);
+        transfers.SetCancel(monitoring ? "Stop monitoring" : "Cancel activity",
+            monitoring || (transferring && operation is { IsCancellationRequested: false }));
     }
 
     private void SetFeedback(string text, bool error = false)

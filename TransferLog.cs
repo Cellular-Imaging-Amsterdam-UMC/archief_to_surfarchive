@@ -5,10 +5,11 @@ namespace SurfArchive;
 internal enum TransferState
 {
     Preparing, CheckingStatus, RequestingTape, TapeQueue, RestoringTape, Transferring, Verifying,
-    Completed, Cancelled, Failed
+    Ready, Completed, Cancelled, Failed
 }
 
-internal sealed class TransferJob(string name, string direction, string source, string target, long size)
+internal sealed class TransferJob(string name, string direction, string source, string target, long size,
+    bool countItems = false, bool tape = false)
 {
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly object sync = new();
@@ -22,6 +23,8 @@ internal sealed class TransferJob(string name, string direction, string source, 
 
     public string Name => name;
     public string Direction => direction;
+    public bool CountItems => countItems;
+    public bool Tape => tape;
     public List<string> Notes { get; } = [$"Source: {source}", $"Destination: {target}"];
     private TransferState state = TransferState.Preparing;
 
@@ -130,14 +133,14 @@ internal sealed class TransferLog : UserControl
         GridColor = DarkTheme.Border, BackgroundColor = DarkTheme.Panel, EnableHeadersVisualStyles = false,
         ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single,
         ColumnHeadersHeight = 27, ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-        AccessibleName = "Transfers"
+        AccessibleName = "Activity"
     };
-    private readonly Label summary = DarkTheme.Label("No transfers yet", DarkTheme.Small, DarkTheme.Muted);
+    private readonly Label summary = DarkTheme.Label("No activity yet", DarkTheme.Small, DarkTheme.Muted);
     private readonly TextBox details = DarkTheme.Input("Transfer details and archive status");
     private readonly Button cancel = DarkTheme.Button("Cancel transfer");
     private readonly List<string> activity = [];
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 300 };
-    private DataGridViewRow? activeRow;
+    private readonly Dictionary<TransferJob, DataGridViewRow> activeRows = [];
 
     public TransferLog()
     {
@@ -153,7 +156,7 @@ internal sealed class TransferLog : UserControl
         heading.ColumnStyles.Add(new(SizeType.Percent, 100));
         heading.ColumnStyles.Add(new(SizeType.AutoSize));
         heading.Controls.Add(DarkTheme.Row(DarkTheme.Label("↔", DarkTheme.Heading, DarkTheme.Mint),
-            DarkTheme.Label("  Transfers", DarkTheme.Heading), summary), 0, 0);
+            DarkTheme.Label("  Activity", DarkTheme.Heading), summary), 0, 0);
         summary.Margin = new Padding(14, 4, 0, 0);
         heading.Controls.Add(cancel, 1, 0);
         cancel.Click += (_, _) => CancelRequested?.Invoke();
@@ -184,25 +187,27 @@ internal sealed class TransferLog : UserControl
             Padding = new Padding(5, 0, 5, 0)
         };
         AddColumn("File", 210, fill: true);
-        AddColumn("Direction", 92);
+        AddColumn("Action", 144);
         AddColumn("Status", 121);
         AddColumn("Progress", 131);
-        AddColumn("Transferred", 141);
+        AddColumn("Processed", 135);
         AddColumn("Speed", 83);
         AddColumn("ETA", 68);
-        AddColumn("Copy time", 88);
+        AddColumn("Step time", 88);
         AddColumn("Total time", 75);
         jobs.CellPainting += PaintProgress;
-        jobs.SelectionChanged += (_, _) => ShowDetails();
+        jobs.SelectionChanged += (_, _) => { ShowDetails(); SelectionChanged?.Invoke(); };
         timer.Tick += (_, _) =>
         {
-            if (activeRow is not null)
-                UpdateRow(activeRow);
+            foreach (var row in activeRows.Values)
+                UpdateRow(row);
         };
         timer.Start();
     }
 
     public event Action? CancelRequested;
+    public event Action? SelectionChanged;
+    public TransferJob? SelectedJob => jobs.CurrentRow?.Tag as TransferJob;
 
     public void Add(TransferJob job)
     {
@@ -213,7 +218,7 @@ internal sealed class TransferLog : UserControl
         jobs.CurrentCell = row.Cells[0];
         row.Selected = true;
         row.Cells[0].ToolTipText = job.Name;
-        activeRow = row;
+        activeRows.Add(job, row);
         UpdateRow(row);
         UpdateSummary();
         ShowDetails(job);
@@ -222,23 +227,31 @@ internal sealed class TransferLog : UserControl
     public void Finish(TransferJob job, TransferState state)
     {
         job.Finish(state);
-        if (activeRow is not null)
-            UpdateRow(activeRow);
-        activeRow = null;
+        if (activeRows.Remove(job, out var row))
+            UpdateRow(row);
         UpdateSummary();
         ShowDetails();
     }
 
-    public void SetCancelEnabled(bool enabled) => cancel.Enabled = enabled;
+    public void SetCancel(string caption, bool enabled)
+    {
+        cancel.Text = caption;
+        cancel.Enabled = enabled;
+    }
 
     public void Log(string message, TransferJob? job = null)
     {
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
         if (job is not null)
+        {
             job.Notes.Add(line);
+            if (job.Tape && job.Notes.Count > 122)
+                job.Notes.RemoveAt(2);
+        }
         else
             activity.Add(line);
-        ShowDetails(job);
+        if (job is null || job == SelectedJob)
+            ShowDetails();
     }
 
     private void ShowDetails(TransferJob? preferred = null)
@@ -255,9 +268,9 @@ internal sealed class TransferLog : UserControl
 
     private void UpdateSummary() => summary.Text = jobs.Rows.Count switch
     {
-        0 => "No transfers yet",
-        1 => "1 transfer",
-        _ => $"{jobs.Rows.Count:N0} transfers · newest first"
+        0 => "No activity yet",
+        1 => "1 activity",
+        _ => $"{jobs.Rows.Count:N0} activities · newest first"
     };
 
     private void AddColumn(string title, int width, bool fill = false) =>
@@ -279,22 +292,24 @@ internal sealed class TransferLog : UserControl
             TransferState.RequestingTape => "Requesting tape",
             TransferState.TapeQueue => "Waiting for tape",
             TransferState.RestoringTape => "Restoring tape",
+            TransferState.Ready => "Ready to download",
             _ => snapshot.State.ToString()
         };
         row.Cells[2].Style.ForeColor = snapshot.State switch
         {
-            TransferState.Completed => DarkTheme.Mint,
+            TransferState.Completed or TransferState.Ready => DarkTheme.Mint,
             TransferState.Failed => DarkTheme.Error,
             TransferState.Cancelled or TransferState.RequestingTape or TransferState.TapeQueue
                 or TransferState.RestoringTape => DarkTheme.Amber,
             _ => DarkTheme.Ink
         };
-        row.Cells[3].Value = snapshot.WaitingForTape ? "Tape restore" : snapshot.Percent;
-        row.Cells[4].Value = $"{TransferJob.FormatBytes(snapshot.Copied)} / {TransferJob.FormatBytes(snapshot.Total)}";
-        row.Cells[5].Value = snapshot.Speed > 0 ? TransferJob.FormatBytes(snapshot.Speed) + "/s" : "—";
+        row.Cells[3].Value = job.Tape ? snapshot.WaitingForTape ? "Tape restore" : "—" : snapshot.Percent;
+        row.Cells[4].Value = job.Tape ? "—" : $"{Format(snapshot.Copied)} / {Format(snapshot.Total)}";
+        row.Cells[5].Value = snapshot.Speed > 0 ? Format(snapshot.Speed) + "/s" : "—";
         row.Cells[6].Value = snapshot.Eta is { } eta ? TransferJob.FormatTime(eta + TimeSpan.FromMilliseconds(999)) : "—";
         row.Cells[7].Value = snapshot.CopyTime is { } copy ? TransferJob.FormatTime(copy) : "—";
         row.Cells[8].Value = TransferJob.FormatTime(snapshot.Elapsed);
+        string Format(double value) => job.CountItems ? $"{value:N0} items" : TransferJob.FormatBytes(value);
     }
 
     private void PaintProgress(object? sender, DataGridViewCellPaintingEventArgs e)

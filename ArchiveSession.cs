@@ -246,8 +246,21 @@ internal sealed class ArchiveSession : IDisposable
         }
     }
 
-    public async Task Download(string source, string localDirectory,
-        IProgress<TransferProgress> progress, Action<RestoreUpdate> restore, CancellationToken token)
+    public async Task<ArchiveState> MonitorRestore(string source, Action<RestoreUpdate> report, CancellationToken token)
+    {
+        using var ssh = await OpenShellAsync(token);
+        string quoted = Quote(source);
+        return await TapeRestore.WaitForDisk(
+            ct => ReadState(ssh, quoted, ct),
+            async ct => { await RunAsync(ssh, "daget -a " + quoted, ct, timeoutSeconds: 90); },
+            report, TimeSpan.FromSeconds(30), token);
+    }
+
+    private static async Task<ArchiveState> ReadState(SshClient ssh, string quoted, CancellationToken token) =>
+        ArchiveStatus.Parse(await RunAsync(ssh, "daattr -a state " + quoted, token));
+
+    public async Task<ArchiveState> Download(string source, string localDirectory,
+        IProgress<TransferProgress> progress, CancellationToken token)
     {
         Reconnect();
         string name = source[(source.LastIndexOf('/') + 1)..];
@@ -257,14 +270,11 @@ internal sealed class ArchiveSession : IDisposable
         if (Path.Exists(target))
             throw new IOException($"A local file or folder named '{name}' already exists.");
 
+        ArchiveState state;
         using (var ssh = await OpenShellAsync(token))
-        {
-            string quoted = Quote(source);
-            await TapeRestore.WaitForDisk(
-                async ct => ArchiveStatus.Parse(await RunAsync(ssh, "daattr -a state " + quoted, ct)),
-                async ct => { await RunAsync(ssh, "daget -a " + quoted, ct, timeoutSeconds: 90); },
-                restore, TimeSpan.FromSeconds(15), token);
-        }
+            state = await ReadState(ssh, Quote(source), token);
+        if (!ArchiveStatus.IsOnDisk(state))
+            throw new IOException($"SURF reports {ArchiveStatus.Label(state)}. Refresh the list or restore the file from tape first.");
 
         token.ThrowIfCancellationRequested();
         Reconnect();
@@ -291,6 +301,7 @@ internal sealed class ArchiveSession : IDisposable
         {
             File.Delete(staging);
         }
+        return state;
     }
 
     public async Task VerifyUpload(string source, IProgress<TransferProgress> progress, Action<string> log,
@@ -344,6 +355,48 @@ internal sealed class ArchiveSession : IDisposable
         FileShare.Read, bufferSize: 1024 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
 
     public void Dispose() => sftp.Dispose();
+
+    public PackageDestination PackageTarget() => new(this);
+
+    internal sealed class PackageDestination(ArchiveSession session) : IPackageDestination, IDisposable
+    {
+        private SshClient? shell;
+        private string directory = "";
+        public string Root => session.Root;
+
+        public async Task Prepare(string parent, string name, bool resume, CancellationToken token)
+        {
+            if ((parent != Root && !parent.StartsWith(Root + "/", StringComparison.Ordinal)) ||
+                parent.Split('/').Any(part => part is "." or ".." || part.Any(char.IsControl)))
+                throw new IOException("The package destination is outside this SURF archive.");
+
+            directory = Child(parent, name);
+            shell = await session.OpenShellAsync(token);
+            await RunAsync(shell,
+                $"command -v sha256sum >/dev/null && cd -- {Quote(Root)} && archive_root=$(pwd -P) && cd -- {Quote(parent)} && " +
+                "case \"$(pwd -P)/\" in \"$archive_root/\"*) ;; *) exit 4 ;; esac", token);
+            session.Reconnect();
+            token.ThrowIfCancellationRequested();
+            if (!resume || !session.sftp.Exists(directory))
+                session.sftp.CreateDirectory(directory);
+            await RunAsync(shell, "test -d " + Quote(directory) + " && test ! -L " + Quote(directory), token);
+        }
+
+        public bool HasPart(string name) => session.sftp.Exists(Child(directory, name));
+
+        public Task Upload(string localPath, IProgress<TransferProgress> progress, CancellationToken token) =>
+            session.Upload(localPath, directory, progress, token);
+
+        public async Task<string> Hash(string name, CancellationToken token)
+        {
+            string path = Quote(Child(directory, name));
+            string value = await RunAsync(shell!, $"test -f {path} && test ! -L {path} && sha256sum < {path}",
+                token, timeoutSeconds: 120);
+            return value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        }
+
+        public void Dispose() => shell?.Dispose();
+    }
 }
 
 internal sealed class Callback<T>(Action<T> action) : IProgress<T>

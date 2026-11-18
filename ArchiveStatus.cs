@@ -7,6 +7,9 @@ internal enum ArchiveState
 
 internal static class ArchiveStatus
 {
+    public static bool IsOnDisk(ArchiveState? state) => state is ArchiveState.REG or ArchiveState.DUL;
+    public static bool CanRestore(ArchiveState? state) => state is ArchiveState.OFL or ArchiveState.QUE or ArchiveState.STG;
+
     public static string Label(ArchiveState state) => state switch
     {
         ArchiveState.REG => "REG · Disk",
@@ -44,11 +47,10 @@ internal record RestoreUpdate(TransferState Phase, ArchiveState? State, string M
 
 internal static class TapeRestore
 {
-    public static async Task WaitForDisk(Func<CancellationToken, Task<ArchiveState>> read,
+    public static async Task<ArchiveState> WaitForDisk(Func<CancellationToken, Task<ArchiveState>> read,
         Func<CancellationToken, Task> request, Action<RestoreUpdate> report, TimeSpan pollInterval, CancellationToken token)
     {
         report(new(TransferState.CheckingStatus, null, "Checking the current archive status."));
-        ArchiveState? previous = null;
         bool requested = false;
 
         while (true)
@@ -57,10 +59,10 @@ internal static class TapeRestore
             ArchiveState state = await read(token);
             token.ThrowIfCancellationRequested();
 
-            if (state is ArchiveState.REG or ArchiveState.DUL)
+            if (ArchiveStatus.IsOnDisk(state))
             {
-                report(new(TransferState.Preparing, state, $"{ArchiveStatus.Label(state)}. The file is available for SFTP."));
-                return;
+                report(new(TransferState.Ready, state, $"{ArchiveStatus.Label(state)}. Ready to download."));
+                return state;
             }
 
             if (state == ArchiveState.Unknown)
@@ -73,15 +75,14 @@ internal static class TapeRestore
                 requested = true;
                 report(new(TransferState.TapeQueue, state, "Restore requested. Waiting for SURF to stage the file."));
             }
-            else if (state != previous)
+            else
             {
                 if (state == ArchiveState.STG)
-                    report(new(TransferState.RestoringTape, state, "SURF is restoring the file from tape to disk."));
+                    report(new(TransferState.RestoringTape, state, "Checked SURF: restoring the file from tape to disk."));
                 else
-                    report(new(TransferState.TapeQueue, state, "Waiting for SURF to confirm the disk copy is ready."));
+                    report(new(TransferState.TapeQueue, state, $"Checked SURF: {ArchiveStatus.Label(state)}. Waiting for a disk copy."));
             }
 
-            previous = state;
             await Task.Delay(pollInterval, token);
         }
     }
