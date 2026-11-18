@@ -791,10 +791,18 @@ internal sealed class MainWindow : Form
                 SetFeedback("");
                 return;
             }
-
-            foreach (var request in requests)
+            foreach (var planned in requests)
             {
                 token.ThrowIfCancellationRequested();
+                var request = planned;
+                if (options.LocalStagingFolder is { } local)
+                {
+                    var plan = await Task.Run(() => planned.Plan.WithPreferredStaging(local,
+                        PackageFiles.LocalStagingFreeBytes(local)), token);
+                    request = planned with { Plan = plan };
+                    if (plan.UsesFallback)
+                        transfers.Log($"Local staging has too little free space for {request.Name}. Using {request.LocalPath}.");
+                }
                 await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
                     ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
                         target, options, progress, token), token);
@@ -904,7 +912,7 @@ internal sealed class MainWindow : Form
     private static (string Caption, string Working, string Detail, bool ShowRate) DescribeStep(PackageStep step) => step switch
     {
         PackageStep.Archive => ("Compress source", "Compressing", "Source data read for compression.", true),
-        PackageStep.Verify => ("Check local archive", "Checking", "Archive parts and decoded file contents read for verification.", true),
+        PackageStep.Verify => ("Check local archive", "Checking", "Checks every archive part. New archives also compare all decoded ZIP contents with the source files.", true),
         PackageStep.Index => ("Write archive metadata", "Writing", "Items indexed for the contents files. Also writes retention.json.", false),
         PackageStep.RemoveOriginals => ("Remove originals", "Removing", "Originals are removed after all SURF SHA-256 checks pass.", false),
         PackageStep.Upload => ("Upload to SURF", "Uploading", "Completed parts upload during packing. The final size includes compressed parts and metadata.", true),

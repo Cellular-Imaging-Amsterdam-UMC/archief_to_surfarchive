@@ -101,6 +101,7 @@ internal static class ArchivePackage
         CancellationToken token, long partLimit = PartLimit)
     {
         ValidateFolderName(archiveName);
+        token.ThrowIfCancellationRequested();
         string folder = Path.Combine(plan.StagingParent, name);
         if (Path.Exists(folder) || partLimit < 4096 || partLimit > PartLimit)
             throw new IOException("The local package folder already exists or the volume size is invalid.");
@@ -288,11 +289,12 @@ internal static class ArchivePackage
     {
         long total = checked(parts.Sum(part => part.Size) + plan.Bytes), done = 0;
         report(new(PackageStep.Verify, 0, total));
-        VerifyParts(parts, frozen, Count, token);
         using var volumes = new ZipVolumeReader(parts, frozen.Get, token);
         using var zip = new ZipArchive(volumes, ZipArchiveMode.Read);
         if (zip.Entries.Count != plan.Entries.Count)
             throw new IOException("The ZIP archive has an unexpected number of entries.");
+        // ZipArchive reads the central directory first. Start sequential part checks as entry decoding begins.
+        volumes.StartVerification(Count);
         var buffer = new byte[1 << 20];
         for (int i = 0; i < plan.Entries.Count; i++)
         {
@@ -309,6 +311,7 @@ internal static class ArchivePackage
                     throw new IOException($"The ZIP contents do not match {expected.Name}.");
             }
         }
+        volumes.CompleteVerification();
         report(new(PackageStep.Verify, total, total, Finished: true));
 
         void Count(int bytes) => report(new(PackageStep.Verify, done += bytes, total));

@@ -112,9 +112,14 @@ internal sealed class HashingFileStream(SafeFileHandle source, Action<int> read,
 internal sealed class ZipVolumeReader(ArchivePart[] parts, Func<string, SafeFileHandle> open, CancellationToken token) : SequentialStream
 {
     private readonly long[] offsets = PartOffsets(parts);
-    private SafeFileHandle? current;
-    private int currentIndex = -1;
+    private readonly byte[] window = new byte[1 << 20];
+    private long windowStart;
+    private int windowLength;
+    private int windowPart;
     private long position;
+    private IncrementalHash? checksum;
+    private Action<int>? verifiedBytes;
+    private long verifiedThrough;
 
     public override bool CanRead => true;
     public override bool CanWrite => false;
@@ -145,20 +150,94 @@ internal sealed class ZipVolumeReader(ArchivePart[] parts, Func<string, SafeFile
         token.ThrowIfCancellationRequested();
         if (position >= Length || buffer.IsEmpty)
             return 0;
-        int index = Array.BinarySearch(offsets, position);
-        if (index < 0)
-            index = ~index - 1;
-        if (currentIndex != index)
-        {
-            current = open(parts[index].Name);
-            currentIndex = index;
-        }
-        int count = RandomAccess.Read(current!, buffer[..(int)Math.Min(buffer.Length, offsets[index + 1] - position)],
-            position - offsets[index]);
-        if (count == 0)
-            throw new EndOfStreamException($"Could not read ZIP volume {parts[index].Name}.");
+        if (checksum is not null)
+            VerifyThrough(position);
+        if (!Contains(position))
+            ReadWindow(position);
+        HashWindow();
+
+        int offset = (int)(position - windowStart);
+        int count = Math.Min(buffer.Length, windowLength - offset);
+        window.AsSpan(offset, count).CopyTo(buffer);
         position += count;
         return count;
+    }
+
+    public void StartVerification(Action<int> report)
+    {
+        foreach (var part in parts)
+        {
+            token.ThrowIfCancellationRequested();
+            if (RandomAccess.GetLength(open(part.Name)) != part.Size)
+                throw new IOException($"The size of {part.Name} changed.");
+        }
+        checksum = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        verifiedBytes = report;
+    }
+
+    public void CompleteVerification()
+    {
+        if (checksum is null)
+            throw new InvalidOperationException("ZIP verification has not started.");
+        VerifyThrough(Length);
+    }
+
+    private bool Contains(long offset) => offset >= windowStart && offset < windowStart + windowLength;
+
+    private void ReadWindow(long offset)
+    {
+        int index = Array.BinarySearch(offsets, offset);
+        if (index < 0)
+            index = ~index - 1;
+        long block = (offset - offsets[index]) / window.Length * window.Length;
+        long start = offsets[index] + block;
+        int size = (int)Math.Min(window.Length, offsets[index + 1] - start);
+        var handle = open(parts[index].Name);
+        int read = 0;
+        while (read < size)
+        {
+            token.ThrowIfCancellationRequested();
+            int count = RandomAccess.Read(handle, window.AsSpan(read, size - read), block + read);
+            if (count == 0)
+                throw new EndOfStreamException($"Could not read ZIP volume {parts[index].Name}.");
+            read += count;
+        }
+        windowStart = start;
+        windowLength = size;
+        windowPart = index;
+    }
+
+    private void VerifyThrough(long end)
+    {
+        // ZIP reads may skip headers or descriptors. Hash those gaps and the directory at the end too.
+        while (verifiedThrough < end)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!Contains(verifiedThrough))
+                ReadWindow(verifiedThrough);
+            HashWindow();
+        }
+    }
+
+    private void HashWindow()
+    {
+        if (checksum is null || !Contains(verifiedThrough))
+            return;
+        int offset = (int)(verifiedThrough - windowStart);
+        int count = windowLength - offset;
+        checksum.AppendData(window.AsSpan(offset, count));
+        verifiedThrough += count;
+        if (verifiedThrough == offsets[windowPart + 1] &&
+            !Convert.ToHexString(checksum.GetHashAndReset()).Equals(parts[windowPart].Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new IOException($"Local SHA-256 mismatch for {parts[windowPart].Name}.");
+        verifiedBytes!(count);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            checksum?.Dispose();
+        base.Dispose(disposing);
     }
 
     private static long[] PartOffsets(ArchivePart[] volumes)

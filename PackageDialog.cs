@@ -1,6 +1,6 @@
 namespace SurfArchive;
 
-internal sealed record PackageOptions(bool RemoveOriginals, RetentionMetadata Retention);
+internal sealed record PackageOptions(bool RemoveOriginals, RetentionMetadata Retention, string? LocalStagingFolder = null);
 
 internal static class PackageDialog
 {
@@ -13,7 +13,7 @@ internal static class PackageDialog
         Body(1, "Use this if an Archive to SURF job failed or was cancelled and the app kept a verified local recovery folder.");
 
         Section(2, "1. Find the local recovery folder",
-            "Look for “Local package folder kept” in Activity. After a restart, look next to the source data or in the temporary staging folder on L:. Select the local SURF-… folder that contains package.json.");
+            "Look for “Local package folder kept” in Activity. Check next to the source, on L:, or in the remembered local staging folder. Select the SURF-… folder containing package.json.");
         Section(4, "2. Finish the upload to the original destination",
             "The app uploads missing package files to the same SURF folder. It checks the SHA-256 of every file on SURF, including files already uploaded.");
         Section(6, "3. Clean up the recovery folder",
@@ -85,8 +85,8 @@ internal static class PackageDialog
 
     public static PackageOptions? Confirm(Form owner, IReadOnlyList<ArchiveRequest> requests)
     {
-        using var dialog = CreateDialog("Archive to SURF Data Archive", new Size(764, 644));
-        var layout = Layout([31, 64, 29, 46, 25, -1, 29, 150, 42, 40]);
+        using var dialog = CreateDialog("Archive to SURF Data Archive", new Size(764, 735));
+        var layout = Layout([31, 54, 28, 38, 24, 29, 35, 46, -1, 29, 150, 42, 40]);
         dialog.Controls.Add(layout);
         layout.Controls.Add(DarkTheme.Label("Archive selected data to SURF?", DarkTheme.Heading), 0, 0);
         var explanation = DarkTheme.Label(
@@ -111,54 +111,148 @@ internal static class PackageDialog
         long bytes = requests.Sum(request => request.Plan.Bytes);
         string archives = requests.Count == 1 ? "1 archive" : $"{requests.Count:N0} archives";
         string entries = itemsCount == 1 ? "1 item" : $"{itemsCount:N0} items";
-        layout.Controls.Add(DarkTheme.Label(
-            $"{archives} · {entries} · {TransferJob.FormatBytes(bytes)} source data" +
-            (requests.Any(request => request.Plan.UsesFallback) ? " · Some packages need staging on L:" : ""),
+        layout.Controls.Add(DarkTheme.Label($"{archives} · {entries} · {TransferJob.FormatBytes(bytes)} source data",
             DarkTheme.Small, DarkTheme.Muted), 0, 4);
+        var preference = LocalStagingSettings.Read();
+        var stageLocally = new CheckBox
+        {
+            Text = "Use a temporary staging folder on this PC",
+            AutoSize = true, ForeColor = DarkTheme.Ink, Checked = preference.Enabled
+        };
+        layout.Controls.Add(stageLocally, 0, 5);
+        var stagingPath = DarkTheme.Input("Local staging folder");
+        stagingPath.Text = preference.Folder;
+        stagingPath.ReadOnly = true;
+        stagingPath.Dock = DockStyle.Top;
+        var browse = DarkTheme.Button("Browse…");
+        var location = new TableLayoutPanel { ColumnCount = 2, Dock = DockStyle.Fill, Margin = Padding.Empty };
+        location.ColumnStyles.Add(new(SizeType.Percent, 100));
+        location.ColumnStyles.Add(new(SizeType.AutoSize));
+        location.Controls.Add(stagingPath, 0, 0);
+        location.Controls.Add(browse, 1, 0);
+        layout.Controls.Add(location, 0, 6);
+        var stagingInfo = StatusLabel("");
+        layout.Controls.Add(stagingInfo, 0, 7);
         var items = DarkTheme.Input("Selected items and package destinations");
         items.Multiline = true;
         items.ReadOnly = true;
         items.WordWrap = false;
         items.Dock = DockStyle.Fill;
         items.ScrollBars = ScrollBars.Both;
-        items.Lines = requests.SelectMany(request => new[] {
-            $"SURF    {request.RemotePath}", $"Local   {request.LocalPath}",
-            $"Items   {string.Join("  ·  ", request.Items.Select(item => item.Name + (item.IsDirectory ? " [folder]" : "")))}", ""
-        }).ToArray();
-        items.Select(0, 0);
         DarkTheme.Explorer(items);
-        layout.Controls.Add(items, 0, 5);
+        layout.Controls.Add(items, 0, 8);
 
         var retention = new RetentionMetadata(DateOnly.FromDateTime(DateTime.Today), new RetentionFields());
         var fields = new RetentionInput(retention);
         layout.Controls.Add(DarkTheme.Label(requests.Count > 1 ? "Retention for all selected archives" : "Archive retention",
-            DarkTheme.Heading), 0, 6);
-        layout.Controls.Add(fields, 0, 7);
+            DarkTheme.Heading), 0, 9);
+        layout.Controls.Add(fields, 0, 10);
         var feedback = StatusLabel("The retention file records your intended minimum storage period. It does not change SURF's storage settings.");
-        layout.Controls.Add(feedback, 0, 8);
+        layout.Controls.Add(feedback, 0, 11);
 
         var confirm = DarkTheme.Button("Archive and remove originals");
         var cancel = Cancel();
         var actions = Actions(confirm, cancel);
         actions.Margin = new Padding(0, 7, 0, 0);
-        layout.Controls.Add(actions, 0, 9);
+        layout.Controls.Add(actions, 0, 12);
         dialog.AcceptButton = dialog.CancelButton = cancel;
         dialog.Shown += (_, _) => cancel.Focus();
         remove.CheckedChanged += (_, _) => UpdateWarning();
+        stageLocally.CheckedChanged += (_, _) => RememberStaging();
+        browse.Click += (_, _) =>
+        {
+            using var picker = new FolderBrowserDialog
+            {
+                Description = "Choose a temporary staging folder on this PC",
+                UseDescriptionForTitle = true,
+                SelectedPath = Directory.Exists(stagingPath.Text) ? stagingPath.Text : "",
+                ShowNewFolderButton = true
+            };
+            if (picker.ShowDialog(dialog) != DialogResult.OK)
+                return;
+            stagingPath.Text = picker.SelectedPath;
+            RememberStaging();
+        };
         UpdateWarning();
+        UpdateStaging();
         PackageOptions? options = null;
         confirm.Click += (_, _) =>
         {
+            if (!RememberStaging())
+                return;
             if (fields.Read(out string error) is not { } values)
             {
                 feedback.ForeColor = DarkTheme.Error;
                 feedback.Text = error;
                 return;
             }
-            options = new PackageOptions(remove.Checked, retention with { Fields = values });
+            options = new PackageOptions(remove.Checked, retention with { Fields = values },
+                stageLocally.Checked ? stagingPath.Text : null);
             dialog.DialogResult = DialogResult.OK;
         };
         return dialog.ShowDialog(owner) == DialogResult.OK ? options : null;
+
+        bool RememberStaging()
+        {
+            if (!UpdateStaging())
+                return false;
+            var selected = new LocalStagingSettings(stageLocally.Checked, stagingPath.Text);
+            if (selected != preference)
+            {
+                if (selected.Save())
+                    preference = selected;
+                else
+                    stagingInfo.Text += " Windows could not remember the staging preference.";
+            }
+            return true;
+        }
+
+        bool UpdateStaging()
+        {
+            IReadOnlyList<ArchiveRequest> shown = requests;
+            stagingInfo.ForeColor = DarkTheme.Muted;
+            browse.Enabled = stageLocally.Checked;
+            bool ready = true;
+            if (stageLocally.Checked)
+            {
+                try
+                {
+                    ulong free = PackageFiles.LocalStagingFreeBytes(stagingPath.Text);
+                    shown = requests.Select(request => request with
+                    {
+                        Plan = request.Plan.WithPreferredStaging(stagingPath.Text, free)
+                    }).ToArray();
+                    long required = shown.Max(request => request.Plan.Required);
+                    int fallback = shown.Count(request => request.Plan.UsesFallback);
+                    stagingInfo.Text = $"{TransferJob.FormatBytes(free)} free locally. " +
+                        $"The largest archive needs about {TransferJob.FormatBytes(required)}.";
+                    if (fallback > 0)
+                    {
+                        stagingInfo.ForeColor = DarkTheme.Amber;
+                        stagingInfo.Text += fallback == 1 ? " One archive will use the staging folder on L:."
+                            : $" {fallback:N0} archives will use the staging folder on L:.";
+                    }
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    ready = false;
+                    stagingInfo.ForeColor = DarkTheme.Error;
+                    stagingInfo.Text = error.Message;
+                }
+            }
+            else
+            {
+                stagingInfo.Text = requests.Any(request => request.Plan.UsesFallback)
+                    ? "Some archives will use the staging folder on L: because the source drive has less free space."
+                    : "ZIP parts will be staged next to the source data.";
+            }
+            items.Lines = shown.SelectMany(request => new[] {
+                $"SURF    {request.RemotePath}", $"Local   {request.LocalPath}",
+                $"Items   {string.Join("  ·  ", request.Items.Select(item => item.Name + (item.IsDirectory ? " [folder]" : "")))}", ""
+            }).ToArray();
+            items.Select(0, 0);
+            return ready;
+        }
 
         void UpdateWarning()
         {

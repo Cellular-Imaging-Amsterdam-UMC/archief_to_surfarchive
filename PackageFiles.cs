@@ -11,6 +11,14 @@ internal record PackageEntry(string Path, string Name, bool IsDirectory, long Si
 internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> Entries, long Bytes, long Required,
     string StagingParent, bool UsesFallback)
 {
+    public PackagePlan WithPreferredStaging(string localFolder, ulong freeBytes)
+    {
+        bool fallback = freeBytes < (ulong)Required;
+        string staging = fallback ? PackageFiles.FallbackFolder() : localFolder;
+        CheckStagingLocation(Entries, staging);
+        return this with { StagingParent = staging, UsesFallback = fallback };
+    }
+
     public static PackagePlan Create(string source, IReadOnlyList<ArchiveEntry> selected, CancellationToken token)
     {
         source = Path.TrimEndingDirectorySeparator(Path.GetFullPath(source));
@@ -30,8 +38,7 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         long required = checked(bytes + bytes / 256 + entries.Sum(item => 4096L + 12L * item.Name.Length) + (1L << 20));
         bool fallback = !IsArchiveDrive(source) && PackageFiles.AvailableBytes(source) < (ulong)required;
         string staging = fallback ? PackageFiles.FallbackFolder() : source;
-        if (entries.Any(item => item.IsDirectory && PackageFiles.IsWithin(staging, item.Path)))
-            throw new IOException("The staging location is inside a selected folder.");
+        CheckStagingLocation(entries, staging);
         return new(source, entries, bytes, required, staging, fallback);
 
         void Add(string path, string name, bool? expectedDirectory)
@@ -59,12 +66,42 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         }
     }
 
+    private static void CheckStagingLocation(IReadOnlyList<PackageEntry> entries, string staging)
+    {
+        if (entries.Any(item => item.IsDirectory && PackageFiles.IsWithin(staging, item.Path)))
+            throw new IOException("The staging location is inside a selected folder.");
+    }
+
     private static bool IsArchiveDrive(string path) => string.Equals(Path.GetPathRoot(path), @"L:\",
         StringComparison.OrdinalIgnoreCase);
 }
 
 internal static class PackageFiles
 {
+    public static string LocalStagingFolder => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SurfArchive", "Staging");
+
+    public static ulong LocalStagingFreeBytes(string staging)
+    {
+        string? drive = Path.GetPathRoot(staging);
+        if (!Path.IsPathFullyQualified(staging) || drive is not { Length: 3 } || new DriveInfo(drive).DriveType != DriveType.Fixed)
+            throw new IOException("The staging folder must be on a local fixed drive.");
+
+        string? existing = null;
+        for (string? path = staging; path is not null; path = Path.GetDirectoryName(path))
+        {
+            if (!Path.Exists(path))
+                continue;
+            if (!GetRegularAttributes(path).HasFlag(FileAttributes.Directory))
+                throw new IOException($"Choose a folder for local staging. {path} is not a folder.");
+            existing ??= path;
+        }
+        if (existing is null)
+            throw new IOException("Could not find the local staging drive.");
+
+        return AvailableBytes(existing);
+    }
+
     public static string FallbackFolder()
     {
         string personal = Path.Combine(LocalFiles.ActiveArchive, "Personal Archive");

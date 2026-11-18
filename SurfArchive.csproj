@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>SurfDataArchiveTransfer</AssemblyName>
     <Product>SurfDataArchiveTransfer</Product>
-    <Version>1.6.2</Version>
+    <Version>1.6.3</Version>
     <RootNamespace>SurfArchive</RootNamespace>
     <ApplicationIcon>Assets\SurfArchive.ico</ApplicationIcon>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
