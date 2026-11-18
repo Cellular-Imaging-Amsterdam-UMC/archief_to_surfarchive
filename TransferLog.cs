@@ -22,7 +22,7 @@ internal sealed class TransferJob(string name, string direction, string source, 
     private long total = Math.Max(size, 0);
 
     public string Name => name;
-    public string Direction => direction;
+    public string Direction { get; set; } = direction;
     public bool CountItems => countItems;
     public bool Tape => tape;
     public List<string> Notes { get; } = [$"Source: {source}", $"Destination: {target}"];
@@ -286,6 +286,8 @@ internal sealed class TransferLog : UserControl
         if (row.Tag is not TransferJob job)
             return;
         var snapshot = job.Snapshot();
+        bool restoreOnly = job.Tape && snapshot.CopyTime is null;
+        row.Cells[1].Value = job.Direction;
         row.Cells[2].Value = snapshot.State switch
         {
             TransferState.CheckingStatus => "Checking status",
@@ -303,9 +305,9 @@ internal sealed class TransferLog : UserControl
                 or TransferState.RestoringTape => DarkTheme.Amber,
             _ => DarkTheme.Ink
         };
-        row.Cells[3].Value = job.Tape ? snapshot.WaitingForTape ? "Tape restore" : "—"
+        row.Cells[3].Value = restoreOnly ? snapshot.WaitingForTape ? "Tape restore" : "—"
             : snapshot.State == TransferState.Skipped ? "—" : snapshot.Percent;
-        row.Cells[4].Value = job.Tape || snapshot.State == TransferState.Skipped
+        row.Cells[4].Value = restoreOnly || snapshot.State == TransferState.Skipped
             ? "—" : $"{Format(snapshot.Copied)} / {Format(snapshot.Total)}";
         row.Cells[5].Value = snapshot.Speed > 0 ? Format(snapshot.Speed) + "/s" : "—";
         row.Cells[6].Value = snapshot.Eta is { } eta ? TransferJob.FormatTime(eta + TimeSpan.FromMilliseconds(999)) : "—";

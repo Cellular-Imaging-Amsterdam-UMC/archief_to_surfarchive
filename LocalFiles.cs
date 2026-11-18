@@ -11,7 +11,7 @@ internal static class LocalFiles
 
     public const string ArchiveDrive = @"L:\";
     public const string BasicFolder = @"L:\basic";
-    public const string ActiveArchive = @"L:\Archief\Active";
+    public const string ActiveArchive = @"L:\Archief\active";
 
     private static readonly EnumerationOptions ReadEntries = new()
     {

@@ -30,8 +30,7 @@ internal sealed class ArchiveSession : IDisposable
             throw new ArgumentException("Invalid SURF username.");
         this.credentials = credentials;
         Root = "/archive/" + credentials.Username;
-        sftp = Configure(new SftpClient(Connection()));
-        sftp.OperationTimeout = TimeSpan.FromSeconds(45);
+        sftp = CreateSftpClient();
         try
         {
             sftp.Connect();
@@ -42,6 +41,13 @@ internal sealed class ArchiveSession : IDisposable
             sftp.Dispose();
             throw;
         }
+    }
+
+    private SftpClient CreateSftpClient()
+    {
+        var client = Configure(new SftpClient(Connection()));
+        client.OperationTimeout = TimeSpan.FromSeconds(45);
+        return client;
     }
 
     private ConnectionInfo Connection()
@@ -249,14 +255,15 @@ internal sealed class ArchiveSession : IDisposable
         }
     }
 
-    public async Task<ArchiveState> MonitorRestore(string source, Action<RestoreUpdate> report, CancellationToken token)
+    public async Task<ArchiveState> MonitorRestore(string source, Action<RestoreUpdate> report,
+        Func<CancellationToken, Task> waitForNextCheck, CancellationToken token)
     {
         using var ssh = await OpenShellAsync(token);
         string quoted = Quote(source);
         return await TapeRestore.WaitForDisk(
             ct => ReadState(ssh, quoted, ct),
             async ct => { await RunAsync(ssh, "daget -a " + quoted, ct, timeoutSeconds: 90); },
-            report, TimeSpan.FromSeconds(30), token);
+            report, waitForNextCheck, token);
     }
 
     private static async Task<ArchiveState> ReadState(SshClient ssh, string quoted, CancellationToken token) =>
@@ -265,14 +272,6 @@ internal sealed class ArchiveSession : IDisposable
     public async Task<ArchiveState> Download(string source, string localDirectory,
         IProgress<TransferProgress> progress, CancellationToken token)
     {
-        Reconnect();
-        string name = source[(source.LastIndexOf('/') + 1)..];
-        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.EndsWith(' ') || name.EndsWith('.'))
-            throw new IOException($"Windows does not support the filename '{name}'.");
-        string target = Path.Combine(localDirectory, name);
-        if (Path.Exists(target))
-            throw new IOException($"A local file or folder named '{name}' already exists.");
-
         ArchiveState state;
         using (var ssh = await OpenShellAsync(token))
             state = await ReadState(ssh, Quote(source), token);
@@ -281,8 +280,32 @@ internal sealed class ArchiveSession : IDisposable
 
         token.ThrowIfCancellationRequested();
         Reconnect();
+        await CopyToLocal(sftp, source, localDirectory, progress, token);
+        return state;
+    }
+
+    public async Task DownloadPreview(string source, string localDirectory,
+        IProgress<TransferProgress> progress, CancellationToken token)
+    {
+        // Previews may become available while the regular SFTP connection is busy with another transfer.
+        using var client = CreateSftpClient();
+        await client.ConnectAsync(token);
+        await CopyToLocal(client, source, localDirectory, progress, token);
+    }
+
+    private static async Task CopyToLocal(SftpClient client, string source, string localDirectory,
+        IProgress<TransferProgress> progress, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        string name = source[(source.LastIndexOf('/') + 1)..];
+        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.EndsWith(' ') || name.EndsWith('.'))
+            throw new IOException($"Windows does not support the filename '{name}'.");
+        string target = Path.Combine(localDirectory, name);
+        if (Path.Exists(target))
+            throw new IOException($"A local file or folder named '{name}' already exists.");
+
         string staging = Path.Combine(localDirectory, ".surfarchive-download-" + Guid.NewGuid().ToString("N"));
-        long size = sftp.GetAttributes(source).Size;
+        long size = client.GetAttributes(source).Size;
         var report = new Callback<DownloadFileProgressReport>(value =>
             progress.Report(new(name, checked((long)value.TotalBytesDownloaded), size)));
         var output = new FileStream(staging, FileMode.CreateNew, FileAccess.Write, FileShare.None,
@@ -292,7 +315,7 @@ internal sealed class ArchiveSession : IDisposable
             await using (output)
             {
                 progress.Report(new(name, 0, size));
-                await sftp.DownloadFileAsync(source, output, report, token);
+                await client.DownloadFileAsync(source, output, report, token);
                 if (output.Length != size)
                     throw new IOException("The downloaded file size differs from the source.");
             }
@@ -304,7 +327,6 @@ internal sealed class ArchiveSession : IDisposable
         {
             File.Delete(staging);
         }
-        return state;
     }
 
     public async Task VerifyUpload(string source, IProgress<TransferProgress> progress, Action<string> log,

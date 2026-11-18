@@ -2,6 +2,46 @@ namespace SurfArchive;
 
 internal static class PackageDialog
 {
+    public static bool ExplainResume(Form owner)
+    {
+        using var dialog = CreateDialog("Resume archive upload", new Size(695, 476));
+        var layout = Layout([32, 49, 25, 65, 25, 57, 25, 60, -1, 38]);
+        dialog.Controls.Add(layout);
+        layout.Controls.Add(DarkTheme.Label("Continue an interrupted archive upload", DarkTheme.Heading), 0, 0);
+        Body(1, "Use this if an Archive to SURF job failed or was cancelled and the app kept a verified local recovery folder.");
+
+        Section(2, "1. Find the local recovery folder",
+            "Look for “Local package folder kept” in Activity. After a restart, look next to the source data or in the temporary staging folder on L:. Select the local SURF-… folder that contains package.json.");
+        Section(4, "2. Finish the upload to the original destination",
+            "The app uploads missing parts and contents files to the same SURF folder. It checks the SHA-256 of every file on SURF, including files already uploaded.");
+        Section(6, "3. Clean up the recovery folder",
+            "The app removes local package files only after all checks pass. It leaves the original source files alone. If a check fails, the recovery files remain available for another attempt.");
+        Body(8, "For files already on tape, use Restore from tape or double-click an HTML or TXT file to open a preview.",
+            DarkTheme.Muted);
+
+        var next = DarkTheme.Button("Choose recovery folder…", primary: true);
+        next.DialogResult = DialogResult.OK;
+        var cancel = Cancel();
+        layout.Controls.Add(Actions(next, cancel), 0, 9);
+        dialog.AcceptButton = next;
+        dialog.CancelButton = cancel;
+        return dialog.ShowDialog(owner) == DialogResult.OK;
+
+        void Section(int row, string heading, string text)
+        {
+            layout.Controls.Add(DarkTheme.Label(heading, DarkTheme.Small, DarkTheme.Mint), 0, row);
+            Body(row + 1, text);
+        }
+
+        void Body(int row, string text, Color? color = null)
+        {
+            var label = DarkTheme.Label(text, DarkTheme.Small, color);
+            label.AutoSize = false;
+            label.Dock = DockStyle.Fill;
+            layout.Controls.Add(label, 0, row);
+        }
+    }
+
     public static string? AskFolderName(Form owner)
     {
         using var dialog = CreateDialog("Name the SURF folder", new Size(510, 181));

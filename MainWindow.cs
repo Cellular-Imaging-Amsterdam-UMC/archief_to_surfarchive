@@ -11,6 +11,7 @@ internal sealed class MainWindow : Form
     private readonly Button restore = DarkTheme.Button("Restore from tape");
     private readonly Button package = DarkTheme.Button("Archive to SURF…", primary: true);
     private readonly Button resume = DarkTheme.Button("Resume archive upload…");
+    private readonly ToolTip help = new();
     private readonly Button removeWindows = DarkTheme.Button("Remove…");
     private readonly Button removeSurf = DarkTheme.Button("Remove…");
     private readonly Button newFolder = DarkTheme.Button("+ New folder");
@@ -19,7 +20,7 @@ internal sealed class MainWindow : Form
     private ArchiveSession? archive;
     private CancellationTokenSource? operation;
     private CancellationTokenSource? statusLookup;
-    private readonly Dictionary<string, (TransferJob Job, CancellationTokenSource Cancellation)> restores = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, RestoreActivity> restores = new(StringComparer.Ordinal);
     private bool transferring;
     private bool closeWhenIdle;
 
@@ -32,10 +33,11 @@ internal sealed class MainWindow : Form
         ClientSize = new Size(1410, 810);
         StartPosition = FormStartPosition.CenterScreen;
         BuildLayout();
+        help.SetToolTip(resume, "Continue an interrupted upload from a local recovery folder containing package.json.");
 
         windows.AddLocation(LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive);
         windows.AddLocation(LocalFiles.BasicFolder, LocalFiles.BasicFolder);
-        windows.AddLocation("Archief Active (L:)", LocalFiles.ActiveArchive);
+        windows.AddLocation(LocalFiles.ActiveArchive, LocalFiles.ActiveArchive);
         foreach (string drive in Directory.GetLogicalDrives())
         {
             if (!drive.Equals(LocalFiles.ArchiveDrive, StringComparison.OrdinalIgnoreCase))
@@ -63,7 +65,7 @@ internal sealed class MainWindow : Form
         removeWindows.AccessibleName = "Remove selected Windows items";
         removeSurf.AccessibleName = "Remove selected SURF items";
         newFolder.Click += async (_, _) => await Run(MakeFolder);
-        transfers.CancelRequested += CancelTransfer;
+        transfers.CancelRequested += CancelSelectedActivity;
         transfers.SelectionChanged += UpdateControls;
         Shown += async (_, _) => await Run(InitialLoad);
         FormClosing += OnClosing;
@@ -71,6 +73,7 @@ internal sealed class MainWindow : Form
         {
             StopStatusLookup();
             StopRestores();
+            help.Dispose();
             archive?.Dispose();
         };
         UpdateControls();
@@ -140,7 +143,7 @@ internal sealed class MainWindow : Form
         foreach (var (path, label) in new[]
         {
             (LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive),
-            (LocalFiles.ActiveArchive, "Archief Active")
+            (LocalFiles.ActiveArchive, LocalFiles.ActiveArchive)
         })
         {
             try
@@ -318,39 +321,7 @@ internal sealed class MainWindow : Form
             return;
         }
 
-        if (ArchiveStatus.CanRestore(file.Status))
-        {
-            SetFeedback($"{ArchiveStatus.Label(file.Status!.Value)}. Use Restore from tape, then double-click when ready.");
-            return;
-        }
-
-        if (archive is null)
-            return;
-        string source = ArchiveSession.Child(surf.PathShown, file.Name);
-        await Run(async token =>
-        {
-            string directory = FilePreview.CreateTemporaryFolder();
-            var job = new TransferJob(file.Name, "Open preview", source, directory, file.Size);
-            transfers.Add(job);
-            try
-            {
-                job.SetPhase(TransferState.CheckingStatus);
-                await Task.Run(() => archive.Download(source, directory, new Callback<TransferProgress>(job.Report), token));
-                token.ThrowIfCancellationRequested();
-                FilePreview.Open(Path.Combine(directory, file.Name));
-                transfers.Log("Opened a temporary local copy.", job);
-                transfers.Finish(job, TransferState.Completed);
-                SetFeedback($"Opened a temporary copy of {file.Name}.");
-            }
-            catch (Exception error)
-            {
-                FilePreview.TryRemoveTemporaryFolder(directory);
-                transfers.Log(error.Message, job);
-                transfers.Finish(job, error is OperationCanceledException && token.IsCancellationRequested
-                    ? TransferState.Cancelled : TransferState.Failed);
-                throw;
-            }
-        }, transfer: true);
+        QueueRestore(surf.PathShown, file, openWhenReady: true);
     }
 
     private async Task UploadDirect()
@@ -431,26 +402,64 @@ internal sealed class MainWindow : Form
     {
         string directory = surf.PathShown;
         foreach (var item in surf.SelectedFiles.Where(item => ArchiveStatus.CanRestore(item.Status)))
-        {
-            string path = ArchiveSession.Child(directory, item.Name);
-            if (restores.ContainsKey(path))
-                continue;
-            var job = new TransferJob(item.Name, "Tape restore", path, "SURF disk", 0, tape: true);
-            var cancellation = new CancellationTokenSource();
-            restores.Add(path, (job, cancellation));
-            transfers.Add(job);
-            _ = MonitorRestore(archive!, directory, path, job, cancellation);
-        }
+            QueueRestore(directory, item, openWhenReady: false);
         UpdateControls();
     }
 
-    private async Task MonitorRestore(ArchiveSession session, string directory, string path, TransferJob job,
-        CancellationTokenSource cancellation)
+    private void QueueRestore(string directory, ArchiveEntry item, bool openWhenReady)
     {
+        if (archive is not { } session)
+            return;
+        string path;
+        try { path = ArchiveSession.Child(directory, item.Name); }
+        catch (ArgumentException error)
+        {
+            SetFeedback(error.Message, error: true);
+            return;
+        }
+        if (restores.TryGetValue(path, out var existing))
+        {
+            if (!openWhenReady)
+                return;
+            if (existing.Cancellation.IsCancellationRequested)
+            {
+                SetFeedback("The previous activity is stopping. Try again when it has stopped.");
+                return;
+            }
+            if (existing.Polling.RequestPreview())
+            {
+                existing.Job.Direction = "Open preview";
+                existing.Job.Notes[1] = "Destination: Temporary Windows preview";
+                transfers.Log("Will open automatically when the file is on disk. Checking every 15 seconds.", existing.Job);
+            }
+            SetFeedback($"Will open {item.Name} when it is ready.");
+            UpdateControls();
+            return;
+        }
+
+        string target = openWhenReady ? "Temporary Windows preview" : "SURF disk";
+        var job = new TransferJob(item.Name, openWhenReady ? "Open preview" : "Tape restore", path, target, item.Size, tape: true);
+        var activity = new RestoreActivity(job, new RestorePolling(), new CancellationTokenSource());
+        if (openWhenReady)
+            activity.Polling.RequestPreview();
+        restores.Add(path, activity);
+        transfers.Add(job);
+        if (openWhenReady)
+            SetFeedback($"Checking the SURF status of {item.Name}…");
+        _ = MonitorRestore(session, directory, path, activity);
+        UpdateControls();
+    }
+
+    private async Task MonitorRestore(ArchiveSession session, string directory, string path, RestoreActivity activity)
+    {
+        TransferJob job = activity.Job;
+        CancellationToken token = activity.Cancellation.Token;
+        bool checkComplete = false;
+        string? local = null;
+        bool opened = false;
         var progress = new Progress<RestoreUpdate>(update =>
         {
-            if (IsDisposed || cancellation.IsCancellationRequested ||
-                !restores.TryGetValue(path, out var current) || current.Job != job)
+            if (IsDisposed || token.IsCancellationRequested || checkComplete)
                 return;
             job.SetPhase(update.Phase);
             transfers.Log(update.Message, job);
@@ -462,20 +471,41 @@ internal sealed class MainWindow : Form
         });
         try
         {
-            var state = await Task.Run(() => session.MonitorRestore(path, ((IProgress<RestoreUpdate>)progress).Report, cancellation.Token));
-            if (!IsDisposed)
+            var state = await Task.Run(() => session.MonitorRestore(path, ((IProgress<RestoreUpdate>)progress).Report,
+                activity.Polling.WaitForNextCheck, token));
+            checkComplete = true;
+            token.ThrowIfCancellationRequested();
+            if (IsDisposed)
+                return;
+            if (surf.PathShown == directory)
+                surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
+
+            if (activity.Polling.OpenWhenReady)
             {
-                if (!cancellation.IsCancellationRequested && surf.PathShown == directory)
-                    surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
+                local = FilePreview.CreateTemporaryFolder();
+                transfers.Log("SURF confirmed the file is on disk. Downloading a temporary copy.", job);
+                await Task.Run(() => session.DownloadPreview(path, local, new Callback<TransferProgress>(job.Report), token));
+                token.ThrowIfCancellationRequested();
+                if (IsDisposed)
+                    return;
+                FilePreview.Open(Path.Combine(local, job.Name));
+                opened = true;
+                transfers.Log("Opened the temporary local copy.", job);
+                transfers.Finish(job, TransferState.Completed);
+                if (operation is null)
+                    SetFeedback($"Opened a temporary copy of {job.Name}.");
+            }
+            else
+            {
                 transfers.Log("Ready. Select the file and click Download when you want to copy it to Windows.", job);
                 transfers.Finish(job, TransferState.Ready);
             }
         }
-        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
             if (!IsDisposed)
             {
-                transfers.Log("Monitoring stopped. A restore already requested on SURF may still finish.", job);
+                transfers.Log("Activity stopped. A restore already requested on SURF may still finish.", job);
                 transfers.Finish(job, TransferState.Cancelled);
             }
         }
@@ -485,13 +515,17 @@ internal sealed class MainWindow : Form
             {
                 transfers.Log(error.Message, job);
                 transfers.Finish(job, TransferState.Failed);
+                if (activity.Polling.OpenWhenReady && operation is null)
+                    SetFeedback(error.Message, error: true);
             }
         }
         finally
         {
-            if (restores.TryGetValue(path, out var current) && current.Job == job)
+            if (!opened && local is not null)
+                FilePreview.TryRemoveTemporaryFolder(local);
+            if (restores.TryGetValue(path, out var current) && current == activity)
                 restores.Remove(path);
-            cancellation.Dispose();
+            activity.Cancellation.Dispose();
             if (!IsDisposed)
                 UpdateControls();
         }
@@ -499,9 +533,10 @@ internal sealed class MainWindow : Form
 
     private void StopRestores()
     {
-        foreach (var item in restores.Values)
-            item.Cancellation.Cancel();
+        var pending = restores.Values.ToArray();
         restores.Clear();
+        foreach (var item in pending)
+            item.Cancellation.Cancel();
     }
 
     private async Task ArchiveSelected()
@@ -548,6 +583,8 @@ internal sealed class MainWindow : Form
 
     private async Task ResumeArchive()
     {
+        if (!PackageDialog.ExplainResume(this))
+            return;
         using var picker = new FolderBrowserDialog
         {
             Description = "Select the local SURF package folder containing package.json.",
@@ -742,15 +779,23 @@ internal sealed class MainWindow : Form
         }
     }
 
-    private void CancelTransfer()
+    private RestoreActivity? SelectedRestore => transfers.SelectedJob is { Tape: true } job
+        ? restores.Values.FirstOrDefault(item => item.Job == job && !item.Cancellation.IsCancellationRequested)
+        : null;
+
+    private void CancelSelectedActivity()
     {
-        if (operation is null && transfers.SelectedJob is { Tape: true } job)
+        if (SelectedRestore is { } activity)
         {
-            foreach (var item in restores.Values.Where(item => item.Job == job))
-                item.Cancellation.Cancel();
+            activity.Cancellation.Cancel();
             UpdateControls();
             return;
         }
+        CancelTransfer();
+    }
+
+    private void CancelTransfer()
+    {
         if (operation is null || !transferring)
             return;
         operation.Cancel();
@@ -760,6 +805,7 @@ internal sealed class MainWindow : Form
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
+        StopRestores();
         if (operation is null)
             return;
         e.Cancel = true;
@@ -789,10 +835,11 @@ internal sealed class MainWindow : Form
         removeWindows.Enabled = idle && windows.SelectedItems.Count > 0;
         removeSurf.Enabled = idle && online && surf.SelectedItems.Count > 0;
         newFolder.Enabled = idle && surf.HasFolder;
-        bool monitoring = idle && transfers.SelectedJob is { Tape: true } job &&
-            restores.Values.Any(item => item.Job == job && !item.Cancellation.IsCancellationRequested);
-        transfers.SetCancel(monitoring ? "Stop monitoring" : "Cancel activity",
-            monitoring || (transferring && operation is { IsCancellationRequested: false }));
+        var selectedRestore = SelectedRestore;
+        string cancelCaption = selectedRestore is null ? "Cancel activity"
+            : selectedRestore.Polling.OpenWhenReady ? "Cancel preview" : "Stop monitoring";
+        transfers.SetCancel(cancelCaption,
+            selectedRestore is not null || (transferring && operation is { IsCancellationRequested: false }));
     }
 
     private void SetFeedback(string text, bool error = false)
@@ -800,4 +847,6 @@ internal sealed class MainWindow : Form
         feedback.Text = text;
         feedback.ForeColor = error ? DarkTheme.Error : DarkTheme.Muted;
     }
+
+    private sealed record RestoreActivity(TransferJob Job, RestorePolling Polling, CancellationTokenSource Cancellation);
 }

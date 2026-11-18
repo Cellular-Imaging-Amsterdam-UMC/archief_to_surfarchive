@@ -45,10 +45,34 @@ internal static class ArchiveStatus
 
 internal record RestoreUpdate(TransferState Phase, ArchiveState? State, string Message);
 
+internal sealed class RestorePolling
+{
+    public static readonly TimeSpan ManualInterval = TimeSpan.FromSeconds(30);
+    public static readonly TimeSpan PreviewInterval = TimeSpan.FromSeconds(15);
+    private readonly TaskCompletionSource preview = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public bool OpenWhenReady => preview.Task.IsCompletedSuccessfully;
+    public bool RequestPreview() => preview.TrySetResult();
+
+    public async Task WaitForNextCheck(CancellationToken token)
+    {
+        if (OpenWhenReady)
+        {
+            await Task.Delay(PreviewInterval, token);
+        }
+        else
+        {
+            await Task.WhenAny(Task.Delay(ManualInterval, token), preview.Task);
+            token.ThrowIfCancellationRequested();
+        }
+    }
+}
+
 internal static class TapeRestore
 {
     public static async Task<ArchiveState> WaitForDisk(Func<CancellationToken, Task<ArchiveState>> read,
-        Func<CancellationToken, Task> request, Action<RestoreUpdate> report, TimeSpan pollInterval, CancellationToken token)
+        Func<CancellationToken, Task> request, Action<RestoreUpdate> report,
+        Func<CancellationToken, Task> waitForNextCheck, CancellationToken token)
     {
         report(new(TransferState.CheckingStatus, null, "Checking the current archive status."));
         bool requested = false;
@@ -83,7 +107,7 @@ internal static class TapeRestore
                     report(new(TransferState.TapeQueue, state, $"Checked SURF: {ArchiveStatus.Label(state)}. Waiting for a disk copy."));
             }
 
-            await Task.Delay(pollInterval, token);
+            await waitForNextCheck(token);
         }
     }
 }
