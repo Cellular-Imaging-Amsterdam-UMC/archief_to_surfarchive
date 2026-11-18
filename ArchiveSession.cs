@@ -25,7 +25,7 @@ internal sealed class ArchiveSession : IDisposable
     public ArchiveSession(Credentials credentials)
     {
         if (!Regex.IsMatch(credentials.Username, @"\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}\z"))
-            throw new ArgumentException("Ongeldige SURF-gebruikersnaam.");
+            throw new ArgumentException("Invalid SURF username.");
         this.credentials = credentials;
         Root = "/archive/" + credentials.Username;
         sftp = Configure(new SftpClient(Connection()));
@@ -96,7 +96,7 @@ internal sealed class ArchiveSession : IDisposable
     public static string Child(string parent, string name)
     {
         if (string.IsNullOrEmpty(name) || name is "." or ".." || name.Contains('/') || name.Any(char.IsControl))
-            throw new ArgumentException("Ongeldige bestands- of mapnaam.");
+            throw new ArgumentException("Invalid file or folder name.");
         return parent + "/" + name;
     }
 
@@ -120,7 +120,7 @@ internal sealed class ArchiveSession : IDisposable
         command.CommandTimeout = TimeSpan.FromSeconds(timeoutSeconds);
         string output = command.Execute().Trim();
         if (command.ExitStatus != 0)
-            throw new IOException($"SURF gaf een fout (exit {command.ExitStatus}): {command.Error.Trim()}");
+            throw new IOException($"SURF returned an error (exit {command.ExitStatus}): {command.Error.Trim()}");
         return output;
     }
 
@@ -132,7 +132,7 @@ internal sealed class ArchiveSession : IDisposable
             progress.Report(new(name, checked((long)value.TotalBytesUploaded), size)));
         await sftp.UploadFileAsync(input, destination, canOverride: false, report, token);
         if (sftp.GetAttributes(destination).Size != size)
-            throw new IOException("De bestandsgrootte op SURF wijkt af van de bron.");
+            throw new IOException("The file size on SURF differs from the source.");
         progress.Report(new(name, size, size));
     }
 
@@ -142,7 +142,7 @@ internal sealed class ArchiveSession : IDisposable
         string name = Path.GetFileName(source);
         string destination = Child(directory, name);
         if (sftp.Exists(destination))
-            throw new IOException($"Op SURF bestaat al een bestand of map met de naam '{name}'.");
+            throw new IOException($"A file or folder named '{name}' already exists on SURF.");
         string staging = Child(directory, ".surfarchive-upload-" + Guid.NewGuid().ToString("N"));
         using var input = OpenSource(source);
 
@@ -163,7 +163,7 @@ internal sealed class ArchiveSession : IDisposable
             }
             catch (Exception cleanup)
             {
-                throw new IOException($"Controleer tijdelijk SURF-bestand {staging}: {cleanup.Message}", failure);
+                throw new IOException($"Could not remove the temporary SURF file {staging}: {cleanup.Message}", failure);
             }
             throw;
         }
@@ -175,10 +175,10 @@ internal sealed class ArchiveSession : IDisposable
         Reconnect();
         string name = source[(source.LastIndexOf('/') + 1)..];
         if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.EndsWith(' ') || name.EndsWith('.'))
-            throw new IOException($"Windows ondersteunt de bestandsnaam '{name}' niet.");
+            throw new IOException($"Windows does not support the filename '{name}'.");
         string target = Path.Combine(localDirectory, name);
         if (Path.Exists(target))
-            throw new IOException($"Lokaal bestaat al een bestand of map met de naam '{name}'.");
+            throw new IOException($"A local file or folder named '{name}' already exists.");
         string staging = Path.Combine(localDirectory, ".surfarchive-download-" + Guid.NewGuid().ToString("N"));
         long size = sftp.GetAttributes(source).Size;
         var report = new Callback<DownloadFileProgressReport>(value =>
@@ -191,7 +191,7 @@ internal sealed class ArchiveSession : IDisposable
             {
                 await sftp.DownloadFileAsync(source, output, report, token);
                 if (output.Length != size)
-                    throw new IOException("De gedownloade bestandsgrootte wijkt af van de bron.");
+                    throw new IOException("The downloaded file size differs from the source.");
             }
             token.ThrowIfCancellationRequested();
             File.Move(staging, target);
@@ -208,7 +208,7 @@ internal sealed class ArchiveSession : IDisposable
     {
         using var input = OpenSource(source);
         string name = Path.GetFileName(source);
-        log($"Bron: {name}, {input.Length:N0} bytes.");
+        log($"Source: {name}, {input.Length:N0} bytes.");
         string expected = Convert.ToHexString(await SHA256.HashDataAsync(input, token));
         input.Position = 0;
         Reconnect();
@@ -224,15 +224,15 @@ internal sealed class ArchiveSession : IDisposable
         sftp.CreateDirectory(directory);
         try
         {
-            log($"Tijdelijk SURF-pad: {destination}");
+            log($"Temporary SURF path: {destination}");
             await CopyUp(input, destination, name, progress, token);
             token.ThrowIfCancellationRequested();
             log(Run(ssh, "dals -l -q " + quotedFile));
             string actual = Run(ssh, "sha256sum < " + quotedFile, timeoutSeconds: 90)
                 .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
             if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
-                throw new IOException("De SHA-256 op SURF wijkt af van de bron.");
-            log("SHA-256 gelijk: " + actual);
+                throw new IOException("The SHA-256 on SURF differs from the source.");
+            log("Matching SHA-256: " + actual);
         }
         finally
         {
@@ -246,7 +246,7 @@ internal sealed class ArchiveSession : IDisposable
                 using var retry = OpenShell();
                 Run(retry, $"if test -e {quotedDirectory} || test -L {quotedDirectory}; then {cleanupCommand}; fi");
             }
-            log("Testbestand en tijdelijke map verwijderd. Afwezigheid bevestigd op SURF.");
+            log("Test file and temporary folder removed. Confirmed absent on SURF.");
         }
     }
 

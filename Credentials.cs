@@ -1,48 +1,29 @@
-using System.Security.Cryptography;
-using System.Text.Json;
-
 namespace SurfArchive;
 
 internal sealed class Credentials(string username, string password)
 {
     public string Username { get; } = username;
     public string Password { get; } = password;
+}
 
-    private static readonly string Store = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "SurfArchive", "account.dpapi");
+internal static class LoginSettings
+{
+    private static readonly string Folder = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SurfArchive");
+    private static readonly string UsernameFile = Path.Combine(Folder, "username.txt");
 
-    public static Credentials? Load()
+    public static void RemoveLegacyPassword() => File.Delete(Path.Combine(Folder, "account.dpapi"));
+    public static string ReadUsername() => File.Exists(UsernameFile) ? File.ReadAllText(UsernameFile).Trim() : "";
+
+    public static void RememberUsername(string? username)
     {
-        if (!File.Exists(Store))
-            return null;
-        byte[] plaintext = ProtectedData.Unprotect(File.ReadAllBytes(Store), null, DataProtectionScope.CurrentUser);
-        try
+        if (string.IsNullOrEmpty(username))
         {
-            return JsonSerializer.Deserialize<Credentials>(plaintext);
+            File.Delete(UsernameFile);
+            return;
         }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(plaintext);
-        }
-    }
 
-    public void Save()
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(Store)!);
-        byte[] plaintext = JsonSerializer.SerializeToUtf8Bytes(this);
-        string temporary = Store + "." + Guid.NewGuid().ToString("N");
-        try
-        {
-            File.WriteAllBytes(temporary, ProtectedData.Protect(plaintext, null, DataProtectionScope.CurrentUser));
-            File.Move(temporary, Store, overwrite: true);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(plaintext);
-            File.Delete(temporary);
-        }
+        Directory.CreateDirectory(Folder);
+        File.WriteAllText(UsernameFile, username);
     }
-
-    public static void Forget() => File.Delete(Store);
 }

@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace SurfArchive;
 
 internal static class Program
@@ -5,40 +7,46 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
-        if (args is ["--proef", var source, var logPath])
-            return RunProbe(source, logPath);
+        CultureInfo.DefaultThreadCurrentCulture = CultureInfo.GetCultureInfo("en-GB");
+        CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.GetCultureInfo("en-GB");
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainWindow());
+
+        using var login = new LoginDialog();
+        if (login.ShowDialog() != DialogResult.OK)
+            return 0;
+
+        var session = login.TakeSession();
+        if (args is ["--proef" or "--probe", var source, var logPath])
+        {
+            using (session)
+                return RunProbe(session, source, logPath);
+        }
+        Application.Run(new MainWindow(session));
         return 0;
     }
 
-    private static int RunProbe(string source, string logPath)
+    private static int RunProbe(ArchiveSession archive, string source, string logPath)
     {
         using var writer = new StreamWriter(logPath, append: false) { AutoFlush = true };
         void Log(string line) => writer.WriteLine($"{DateTimeOffset.Now:O} {line}");
 
         try
         {
-            var account = Credentials.Load() ?? throw new InvalidOperationException("Verbind eerst vanuit de app en bewaar het account lokaal.");
-            using var archive = new ArchiveSession(account);
-            Log($"SFTP-login gelukt op {ArchiveSession.Host}. Persoonlijk archief: {archive.Root}");
-            var entries = archive.List(archive.Root).GetAwaiter().GetResult();
-            Log($"Persoonlijk archief geopend: {entries.Count} zichtbare bestanden en mappen.");
-            var last = System.Diagnostics.Stopwatch.StartNew();
+            Log($"Connected to {ArchiveSession.Host}. Personal archive: {archive.Root}");
+            var timer = System.Diagnostics.Stopwatch.StartNew();
             var progress = new Callback<TransferProgress>(value =>
             {
-                if (last.ElapsedMilliseconds >= 1000 || value.Bytes == value.Total)
-                {
-                    Log($"Upload {value.Bytes:N0} / {value.Total:N0} bytes.");
-                    last.Restart();
-                }
+                if (timer.ElapsedMilliseconds < 1000 && value.Bytes != value.Total)
+                    return;
+                Log($"Uploaded {value.Bytes:N0} / {value.Total:N0} bytes.");
+                timer.Restart();
             });
             archive.VerifyUpload(source, progress, Log, CancellationToken.None).GetAwaiter().GetResult();
             return 0;
         }
-        catch (Exception exception)
+        catch (Exception error)
         {
-            Log("Fout: " + exception.Message);
+            Log("Error: " + error.Message);
             return 1;
         }
     }

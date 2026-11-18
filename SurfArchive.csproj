@@ -7,7 +7,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>SurfArchive</AssemblyName>
+    <Version>1.1.0</Version>
     <RootNamespace>SurfArchive</RootNamespace>
+    <ApplicationIcon>Assets\SurfArchive.ico</ApplicationIcon>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>

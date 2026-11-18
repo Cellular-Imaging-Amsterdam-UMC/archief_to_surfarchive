@@ -1,396 +1,335 @@
-
 namespace SurfArchive;
 
 internal sealed class MainWindow : Form
 {
-    private static readonly Color Ink = Color.FromArgb(25, 45, 65);
-    private static readonly Color Accent = Color.FromArgb(0, 108, 120);
-    private static readonly Color Background = Color.FromArgb(241, 245, 249);
-    private const string DefaultPath = @"L:\Archief\Active";
-
-    private readonly TextBox username = new() { Width = 115, PlaceholderText = "Gebruikersnaam" };
-    private readonly TextBox password = new() { Width = 145, PlaceholderText = "Wachtwoord", UseSystemPasswordChar = true };
-    private readonly CheckBox remember = new() { Text = "Lokaal bewaren", AutoSize = true, Margin = new(8, 7, 8, 3) };
-    private readonly Button connect = ButtonOf("Verbinden", primary: true);
-    private readonly Button forget = ButtonOf("Wissen");
-    private readonly Label connection = new() { Text = "Niet verbonden", AutoSize = true, Margin = new(12, 8, 3, 3) };
-
-    private readonly ComboBox drives = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 65 };
-    private readonly TextBox localAddress = new() { Dock = DockStyle.Fill };
-    private readonly TextBox remoteAddress = new() { Dock = DockStyle.Fill, ReadOnly = true };
-    private readonly ListView localList = CreateList();
-    private readonly ListView remoteList = CreateList();
-    private readonly Button localUp = ButtonOf("Omhoog");
-    private readonly Button localGo = ButtonOf("Ga");
-    private readonly Button archiveShortcut = ButtonOf("Archief");
-    private readonly Button remoteUp = ButtonOf("Omhoog");
-    private readonly Button remoteRefresh = ButtonOf("Vernieuwen");
-
-    private readonly Button upload = ButtonOf("Upload →", primary: true);
-    private readonly Button download = ButtonOf("← Download");
-    private readonly Button probe = ButtonOf("Proefupload");
-    private readonly Button state = ButtonOf("Archiefstatus");
-    private readonly Button newFolder = ButtonOf("Nieuwe SURF-map");
-    private readonly Button cancel = ButtonOf("Annuleren");
-    private readonly ProgressBar progressBar = new() { Dock = DockStyle.Fill, Maximum = 1000 };
-    private readonly Label message = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly TextBox details = new() { Multiline = true, ScrollBars = ScrollBars.Both, WordWrap = false, ReadOnly = true, BackColor = Color.White, Dock = DockStyle.Fill };
-
+    private readonly BrowserPane windows = new("Archief / Windows", local: true);
+    private readonly BrowserPane surf = new("SURF Data Archive", local: false);
+    private readonly TransferLog transfers = new();
+    private readonly Button signIn = DarkTheme.Button("Sign out");
+    private readonly Button upload = DarkTheme.Button("Upload to SURF  →", primary: true);
+    private readonly Button download = DarkTheme.Button("←  Download to Windows", primary: true);
+    private readonly Button probe = DarkTheme.Button("Test upload");
+    private readonly Button status = DarkTheme.Button("Archive status");
+    private readonly Button newFolder = DarkTheme.Button("+ New folder");
+    private readonly Label connection = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
+    private readonly Label feedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private ArchiveSession? archive;
-    private string localPath = "";
-    private string remotePath = "";
     private CancellationTokenSource? operation;
-    private bool exitAfterOperation;
+    private bool transferring;
+    private bool closeWhenIdle;
 
-    public MainWindow()
+    public MainWindow(ArchiveSession? session)
     {
-        Text = "SURF Archief";
-        AutoScaleMode = AutoScaleMode.Dpi;
-        Font = new Font("Segoe UI", 10);
-        ForeColor = Ink;
-        BackColor = Background;
-        MinimumSize = new Size(950, 600);
-        ClientSize = new Size(1220, 740);
+        archive = session;
+        DarkTheme.Window(this);
+        Text = "SURF Archive";
+        MinimumSize = new Size(1040, 660);
+        ClientSize = new Size(1410, 810);
         StartPosition = FormStartPosition.CenterScreen;
+        BuildLayout();
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6 };
-        foreach (int height in new[] { 64, 48, -1, 49, 31, 100 })
-            layout.RowStyles.Add(height < 0 ? new(SizeType.Percent, 100) : new(SizeType.Absolute, height));
-        Controls.Add(layout);
-
-        var header = new Panel { Dock = DockStyle.Fill, BackColor = Ink, Margin = Padding.Empty };
-        header.Controls.Add(new Label
-        {
-            Text = "SURF Archief",
-            AutoSize = true, ForeColor = Color.White, Location = new Point(16, 14),
-            Font = new Font("Segoe UI Semibold", 21)
-        });
-        layout.Controls.Add(header, 0, 0);
-        layout.Controls.Add(Flow(username, password, remember, connect, forget, connection), 0, 1);
-
-        var panes = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new(10, 0, 10, 0) };
-        panes.ColumnStyles.Add(new(SizeType.Percent, 50));
-        panes.ColumnStyles.Add(new(SizeType.Percent, 50));
-        panes.Controls.Add(Pane("Windows", localAddress, localList, drives, archiveShortcut, localUp, localGo), 0, 0);
-        panes.Controls.Add(Pane("SURF Data Archive", remoteAddress, remoteList, remoteUp, remoteRefresh), 1, 0);
-        layout.Controls.Add(panes, 0, 2);
-        layout.Controls.Add(Flow(upload, download, probe, state, newFolder, cancel), 0, 3);
-
-        var status = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new(15, 0, 15, 0) };
-        status.ColumnStyles.Add(new(SizeType.Percent, 100));
-        status.ColumnStyles.Add(new(SizeType.Absolute, 185));
-        status.Controls.Add(message, 0, 0);
-        status.Controls.Add(progressBar, 1, 0);
-        layout.Controls.Add(status, 0, 4);
-        details.Margin = new(15, 3, 15, 12);
-        layout.Controls.Add(details, 0, 5);
-
-        connect.Click += async (_, _) => await Perform(ToggleConnection);
-        forget.Click += (_, _) =>
-        {
-            try
-            {
-                Credentials.Forget();
-                username.Clear();
-                password.Clear();
-                remember.Checked = false;
-                SetMessage("Bewaarde inloggegevens gewist.");
-            }
-            catch (Exception error) { ShowError(error); }
-        };
-        password.KeyDown += (_, e) =>
-        {
-            if (e.KeyCode == Keys.Enter && connect.Enabled) { e.SuppressKeyPress = true; connect.PerformClick(); }
-        };
-
+        windows.AddLocation("Archief Active (L:)", LocalFiles.ActiveArchive);
         foreach (string drive in Directory.GetLogicalDrives())
-            drives.Items.Add(drive);
-        drives.SelectionChangeCommitted += async (_, _) =>
-        {
-            if (drives.SelectedItem is string path)
-                await Perform(_ => ShowLocal(path));
-        };
-        localGo.Click += async (_, _) => await Perform(_ => ShowLocal(localAddress.Text));
-        localAddress.KeyDown += (_, e) =>
-        {
-            if (e.KeyCode == Keys.Enter && localGo.Enabled) { e.SuppressKeyPress = true; localGo.PerformClick(); }
-        };
-        archiveShortcut.Click += async (_, _) => await Perform(_ => ShowLocal(DefaultPath));
-        localUp.Click += async (_, _) => await Perform(_ => ShowLocal(Directory.GetParent(localPath)!.FullName));
-        remoteUp.Click += async (_, _) => await Perform(_ => ShowRemote(remotePath[..remotePath.LastIndexOf('/')]));
-        remoteRefresh.Click += async (_, _) => await Perform(_ => ShowRemote(remotePath));
-
-        localList.ItemActivate += async (_, _) =>
-        {
-            if (Selected(localList) is { IsDirectory: true } entry)
-                await Perform(_ => ShowLocal(Path.Combine(localPath, entry.Name)));
-        };
-        remoteList.ItemActivate += async (_, _) =>
-        {
-            if (Selected(remoteList) is { IsDirectory: true } entry)
-                await Perform(_ => ShowRemote(ArchiveSession.Child(remotePath, entry.Name)));
-        };
-        localList.ItemSelectionChanged += (_, _) => UpdateControls();
-        remoteList.ItemSelectionChanged += (_, _) => UpdateControls();
-        upload.Click += async (_, _) => await Perform(token => Transfer(true, token));
-        download.Click += async (_, _) => await Perform(token => Transfer(false, token));
-        probe.Click += async (_, _) => await Perform(Probe);
-        state.Click += async (_, _) => await Perform(async _ =>
-        {
-            string path = ArchiveSession.Child(remotePath, Selected(remoteList)!.Name);
-            Log(await Task.Run(() => archive!.Status(path)));
-            SetMessage("Archiefstatus opgehaald.");
-        });
-        newFolder.Click += async (_, _) => await Perform(CreateFolder);
-        cancel.Click += (_, _) => RequestCancel();
+            windows.AddLocation(drive, drive);
+        windows.Navigate += async (path, root) => await Run(_ => NavigateLocal(path, root));
+        surf.Navigate += async (path, root) => await Run(_ => NavigateRemote(path, root));
+        windows.SelectionChanged += UpdateControls;
+        surf.SelectionChanged += UpdateControls;
+        signIn.Click += async (_, _) => await Run(ToggleLogin);
+        upload.Click += async (_, _) => await Run(token => Copy(toSurf: true, token), transfer: true);
+        download.Click += async (_, _) => await Run(token => Copy(toSurf: false, token), transfer: true);
+        probe.Click += async (_, _) => await RunProbe();
+        status.Click += async (_, _) => await Run(ShowArchiveStatus);
+        newFolder.Click += async (_, _) => await Run(MakeFolder);
+        transfers.CancelRequested += CancelTransfer;
+        Shown += async (_, _) => await Run(InitialLoad);
         FormClosing += OnClosing;
         FormClosed += (_, _) => archive?.Dispose();
-        Shown += async (_, _) => await Perform(async _ =>
-        {
-            try
-            {
-                var supplied = Credentials.Load();
-                if (supplied is not null)
-                {
-                    username.Text = supplied.Username;
-                    password.Text = supplied.Password;
-                    remember.Checked = true;
-                }
-            }
-            catch (Exception error) { Log("Bewaard account kon niet worden geopend. " + error.Message); }
-            try { await ShowLocal(DefaultPath); }
-            catch (Exception error)
-            {
-                Log("Archiefschijf: " + error.Message);
-                await ShowLocal(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
-            }
-        });
         UpdateControls();
     }
 
-    private static Button ButtonOf(string label, bool primary = false) => new()
+    private void BuildLayout()
     {
-        Text = label, AutoSize = true, MinimumSize = new Size(0, 31),
-        FlatStyle = FlatStyle.Flat, BackColor = primary ? Accent : Color.White,
-        ForeColor = primary ? Color.White : Ink, Padding = new(5, 0, 5, 0), Margin = new(3, 1, 3, 1)
-    };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
+        foreach (int height in new[] { 58, -1, 43, 230, 25 })
+            layout.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+        Controls.Add(layout);
 
-    private static FlowLayoutPanel Flow(params Control[] controls)
-    {
-        var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new(12, 4, 0, 0), WrapContents = false };
-        panel.Controls.AddRange(controls);
-        return panel;
-    }
-
-    private static Control Pane(string title, TextBox address, ListView list, params Control[] navigation)
-    {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Color.White, Padding = new(9), ColumnCount = 1, RowCount = 4 };
-        panel.RowStyles.Add(new(SizeType.Absolute, 27));
-        panel.RowStyles.Add(new(SizeType.Absolute, 36));
-        panel.RowStyles.Add(new(SizeType.Absolute, 32));
-        panel.RowStyles.Add(new(SizeType.Percent, 100));
-        panel.Controls.Add(new Label { Text = title, Font = new Font("Segoe UI Semibold", 13), AutoSize = true }, 0, 0);
-        var bar = Flow(navigation);
-        bar.Padding = Padding.Empty;
-        bar.Margin = Padding.Empty;
-        panel.Controls.Add(bar, 0, 1);
-        panel.Controls.Add(address, 0, 2);
-        panel.Controls.Add(list, 0, 3);
-        return panel;
-    }
-
-    private static ListView CreateList()
-    {
-        var list = new ListView
+        var header = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false,
-            MultiSelect = false, BorderStyle = BorderStyle.FixedSingle, HeaderStyle = ColumnHeaderStyle.Nonclickable
+            Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = DarkTheme.Panel,
+            Padding = new Padding(15, 10, 12, 7), Margin = new Padding(0, 0, 0, 3)
         };
-        list.Columns.Add("Naam", 240);
-        list.Columns.Add("Grootte", 98, HorizontalAlignment.Right);
-        list.Columns.Add("Gewijzigd", 137);
-        list.SizeChanged += (_, _) =>
+        header.ColumnStyles.Add(new(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new(SizeType.AutoSize));
+        header.ColumnStyles.Add(new(SizeType.AutoSize));
+        header.Controls.Add(DarkTheme.Row(DarkTheme.Label("▣", DarkTheme.Brand, DarkTheme.Mint),
+            DarkTheme.Label("  SURF Archive", DarkTheme.Brand)), 0, 0);
+        connection.Margin = new Padding(0, 7, 17, 0);
+        header.Controls.Add(connection, 1, 0);
+        header.Controls.Add(signIn, 2, 0);
+        layout.Controls.Add(header, 0, 0);
+
+        var panes = new TableLayoutPanel
         {
-            list.Columns[0].Width = Math.Max(120, list.ClientSize.Width - list.Columns[1].Width - list.Columns[2].Width - 19);
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(10, 4, 10, 1)
         };
-        return list;
+        panes.ColumnStyles.Add(new(SizeType.Percent, 50));
+        panes.ColumnStyles.Add(new(SizeType.Percent, 50));
+        panes.Controls.Add(windows, 0, 0);
+        panes.Controls.Add(surf, 1, 0);
+        layout.Controls.Add(panes, 0, 1);
+
+        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(13, 5, 13, 1) };
+        actions.ColumnStyles.Add(new(SizeType.Percent, 50));
+        actions.ColumnStyles.Add(new(SizeType.Percent, 50));
+        actions.Controls.Add(DarkTheme.Row(upload, probe), 0, 0);
+        actions.Controls.Add(DarkTheme.Row(download, status, newFolder), 1, 0);
+        layout.Controls.Add(actions, 0, 2);
+
+        transfers.Margin = new Padding(13, 0, 13, 0);
+        layout.Controls.Add(transfers, 0, 3);
+        feedback.AutoSize = false;
+        feedback.AutoEllipsis = true;
+        feedback.Dock = DockStyle.Fill;
+        feedback.Margin = new Padding(14, 4, 14, 0);
+        layout.Controls.Add(feedback, 0, 4);
     }
 
-    private static ArchiveEntry? Selected(ListView list) =>
-        list.SelectedItems.Count == 1 ? (ArchiveEntry?)list.SelectedItems[0].Tag : null;
-
-    private static void Render(ListView list, IEnumerable<ArchiveEntry> entries)
+    private async Task InitialLoad(CancellationToken _)
     {
-        list.BeginUpdate();
+        var local = LoadDefaultLocal();
+        if (archive is null)
+        {
+            await local;
+            return;
+        }
+        await Task.WhenAll(local, NavigateRemote(archive.Root, "My archive"));
+    }
+
+    private async Task LoadDefaultLocal()
+    {
+        try { await NavigateLocal(LocalFiles.ActiveArchive, "Archief Active"); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            transfers.Log($"Could not open {LocalFiles.ActiveArchive}. {error.Message}");
+            string path = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            await NavigateLocal(path, "Documents");
+        }
+    }
+
+    private async Task NavigateLocal(string path, string? root)
+    {
         try
         {
-            list.Items.Clear();
-            var rows = entries.OrderByDescending(entry => entry.IsDirectory)
-                .ThenBy(entry => entry.Name, StringComparer.CurrentCultureIgnoreCase)
-                .Select(entry => new ListViewItem(new[]
-                {
-                    entry.Name, entry.IsDirectory ? "Map" : FormatSize(entry.Size), entry.Modified.ToString("dd-MM-yyyy HH:mm")
-                }) { Tag = entry });
-            list.Items.AddRange(rows.ToArray());
+            string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            var entries = await Task.Run(() => LocalFiles.List(full));
+            windows.ShowFolder(full, root, entries);
         }
-        finally { list.EndUpdate(); }
-    }
-
-    private static string FormatSize(long bytes) => bytes switch
-    {
-        >= 1_000_000_000_000 => $"{bytes / 1e12:0.##} TB",
-        >= 1_000_000_000 => $"{bytes / 1e9:0.##} GB",
-        >= 1_000_000 => $"{bytes / 1e6:0.##} MB",
-        >= 1_000 => $"{bytes / 1e3:0.##} kB",
-        _ => $"{bytes} B"
-    };
-
-    private async Task ShowLocal(string path)
-    {
-        var result = await Task.Run(() =>
+        catch
         {
-            string absolute = Path.GetFullPath(path);
-            var entries = new DirectoryInfo(absolute).EnumerateFileSystemInfos().Select(info => new ArchiveEntry(
-                info.Name, info is DirectoryInfo, info is FileInfo file ? file.Length : 0, info.LastWriteTime)).ToList();
-            return (absolute, entries);
-        });
-        localPath = result.absolute;
-        localAddress.Text = localPath;
-        string? root = Path.GetPathRoot(localPath);
-        drives.SelectedIndex = root is null ? -1 : drives.Items.IndexOf(root);
-        Render(localList, result.entries);
-        SetMessage($"{result.entries.Count} Windows-items");
+            windows.RestoreLocation();
+            throw;
+        }
     }
 
-    private async Task ShowRemote(string path)
+    private async Task NavigateRemote(string path, string? root)
     {
-        var entries = await Task.Run(() => archive!.List(path));
-        remotePath = path;
-        remoteAddress.Text = path;
-        Render(remoteList, entries);
-        SetMessage($"{entries.Count} SURF-items");
+        try
+        {
+            var entries = await Task.Run(() => archive!.List(path));
+            surf.ShowFolder(path, root, entries);
+        }
+        catch
+        {
+            surf.RestoreLocation();
+            throw;
+        }
     }
 
-    private async Task ToggleConnection(CancellationToken _)
+    private async Task ToggleLogin(CancellationToken _)
     {
         if (archive is not null)
         {
-            await Task.Run(archive.Dispose);
+            var currentArchive = archive;
             archive = null;
-            remotePath = "";
-            remoteAddress.Clear();
-            remoteList.Items.Clear();
-            SetMessage("Verbinding met SURF verbroken.");
+            surf.ClearFolder();
+            await Task.Run(currentArchive.Dispose);
+            SetFeedback("Signed out of SURF Data Archive.");
             return;
         }
 
-        var supplied = new Credentials(username.Text.Trim(), password.Text);
-        if (supplied.Username.Length == 0 || supplied.Password.Length == 0)
-            throw new InvalidOperationException("Vul je SURF-gebruikersnaam en wachtwoord in.");
-        var candidate = await Task.Run(() => new ArchiveSession(supplied));
-        archive = candidate;
-        try { await ShowRemote(candidate.Root); }
-        catch
-        {
-            candidate.Dispose();
-            archive = null;
-            throw;
-        }
-        if (remember.Checked)
-            supplied.Save();
-        else
-            Credentials.Forget();
-        Log("SFTP verbonden met " + ArchiveSession.Host);
-    }
-
-    private async Task Transfer(bool sending, CancellationToken token)
-    {
-        var reporter = TransferReporter();
-        if (sending)
-        {
-            string source = Path.Combine(localPath, Selected(localList)!.Name);
-            await Task.Run(() => archive!.Upload(source, remotePath, reporter, token));
-            await ShowRemote(remotePath);
-        }
-        else
-        {
-            string source = ArchiveSession.Child(remotePath, Selected(remoteList)!.Name);
-            await Task.Run(() => archive!.Download(source, localPath, reporter, token));
-            await ShowLocal(localPath);
-        }
-        SetMessage("Kopie voltooid. Grootte gecontroleerd.");
-        Log(message.Text);
-    }
-
-    private async Task Probe(CancellationToken token)
-    {
-        string source = Path.Combine(localPath, Selected(localList)!.Name);
-        string question = $"Tijdelijk uploaden en opruimen op SURF?\n\n{Path.GetFileName(source)}";
-        if (MessageBox.Show(this, question, "Proefupload", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+        using var login = new LoginDialog { StartPosition = FormStartPosition.CenterParent };
+        if (login.ShowDialog(this) != DialogResult.OK)
             return;
-        var reporter = TransferReporter();
-        await Task.Run(() => archive!.VerifyUpload(source, reporter,
-            line => Invoke(() => Log(line)), token));
-        SetMessage("Proefupload geslaagd en verwijderd.");
+
+        archive = login.TakeSession();
+        await NavigateRemote(archive.Root, "My archive");
+        SetFeedback("");
     }
 
-    private async Task CreateFolder(CancellationToken _)
+    private async Task Copy(bool toSurf, CancellationToken token)
     {
-        using var dialog = new Form { Text = "Nieuwe SURF-map", ClientSize = new Size(370, 86),
-            FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
-            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false };
-        var name = new TextBox { Dock = DockStyle.Top, PlaceholderText = "Mapnaam" };
-        var accept = ButtonOf("Maken", primary: true);
-        accept.DialogResult = DialogResult.OK;
-        dialog.Controls.Add(Flow(accept));
-        dialog.Controls.Add(name);
-        dialog.AcceptButton = accept;
+        BrowserPane origin = toSurf ? windows : surf;
+        BrowserPane target = toSurf ? surf : windows;
+        int failures = 0;
+        foreach (var entry in origin.SelectedFiles)
+        {
+            token.ThrowIfCancellationRequested();
+            string source = toSurf ? Path.Combine(origin.PathShown, entry.Name) : ArchiveSession.Child(origin.PathShown, entry.Name);
+            var job = new TransferJob(entry.Name, toSurf ? "Upload →" : "← Download", source, target.PathShown, entry.Size);
+            transfers.Add(job);
+
+            try
+            {
+                var progress = new Callback<TransferProgress>(job.Report);
+                if (toSurf)
+                    await Task.Run(() => archive!.Upload(source, target.PathShown, progress, token));
+                else
+                    await Task.Run(() => archive!.Download(source, target.PathShown, progress, token));
+                transfers.Log("Copy complete. File size verified.", job);
+                transfers.Finish(job, TransferState.Completed);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                transfers.Log("Transfer cancelled.", job);
+                transfers.Finish(job, TransferState.Cancelled);
+                throw;
+            }
+            catch (Exception error)
+            {
+                failures++;
+                transfers.Log(error.Message, job);
+                transfers.Finish(job, TransferState.Failed);
+            }
+        }
+
+        if (toSurf)
+            await NavigateRemote(target.PathShown, null);
+        else
+            await NavigateLocal(target.PathShown, null);
+        SetFeedback(failures == 0 ? "Transfer complete." : $"{failures:N0} transfer(s) failed. See the transfer log.", failures > 0);
+    }
+
+    private async Task RunProbe()
+    {
+        var entry = windows.SelectedFiles.Single();
+        string source = Path.Combine(windows.PathShown, entry.Name);
+        if (MessageBox.Show(this, $"Upload temporarily, verify and remove the test copy from SURF?\n\n{entry.Name}",
+            "Test upload", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+            return;
+
+        await Run(async token =>
+        {
+            var job = new TransferJob(entry.Name, "Test upload", source, archive!.Root, entry.Size);
+            transfers.Add(job);
+            try
+            {
+                await Task.Run(() => archive.VerifyUpload(source, new Callback<TransferProgress>(job.Report),
+                    line => Invoke(() => transfers.Log(line, job)), token));
+                transfers.Finish(job, TransferState.Completed);
+                SetFeedback("Test upload verified and removed.");
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                transfers.Log("Test upload cancelled.", job);
+                transfers.Finish(job, TransferState.Cancelled);
+                throw;
+            }
+            catch (Exception error)
+            {
+                transfers.Log(error.Message, job);
+                transfers.Finish(job, TransferState.Failed);
+                throw;
+            }
+        }, transfer: true);
+    }
+
+    private async Task ShowArchiveStatus(CancellationToken _)
+    {
+        foreach (var entry in surf.SelectedFiles)
+        {
+            string path = ArchiveSession.Child(surf.PathShown, entry.Name);
+            transfers.Log(await Task.Run(() => archive!.Status(path)));
+        }
+        SetFeedback("Archive status is shown in the transfer log.");
+    }
+
+    private async Task MakeFolder(CancellationToken _)
+    {
+        using var dialog = new Form
+        {
+            Text = "New SURF folder", ClientSize = new Size(382, 112), FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false
+        };
+        DarkTheme.Window(dialog);
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Padding = new Padding(15) };
+        layout.RowStyles.Add(new(SizeType.Absolute, 38));
+        layout.RowStyles.Add(new(SizeType.Percent, 100));
+        var name = DarkTheme.Input("Folder name");
+        name.PlaceholderText = "Folder name";
+        name.Dock = DockStyle.Top;
+        var create = DarkTheme.Button("Create", primary: true);
+        var cancel = DarkTheme.Button("Cancel");
+        create.DialogResult = DialogResult.OK;
+        cancel.DialogResult = DialogResult.Cancel;
+        var actions = DarkTheme.Row(cancel, create);
+        actions.FlowDirection = FlowDirection.RightToLeft;
+        layout.Controls.Add(name, 0, 0);
+        layout.Controls.Add(actions, 0, 1);
+        dialog.Controls.Add(layout);
+        dialog.AcceptButton = create;
+        dialog.CancelButton = cancel;
         if (dialog.ShowDialog(this) != DialogResult.OK)
             return;
 
-        string path = ArchiveSession.Child(remotePath, name.Text.Trim());
+        string path = ArchiveSession.Child(surf.PathShown, name.Text.Trim());
         await Task.Run(() => archive!.MakeDirectory(path));
-        await ShowRemote(remotePath);
+        await NavigateRemote(surf.PathShown, null);
+        SetFeedback("Folder created.");
     }
 
-    private IProgress<TransferProgress> TransferReporter()
-    {
-        long next = 0;
-        return new Callback<TransferProgress>(value =>
-        {
-            long now = Environment.TickCount64;
-            if (now < Interlocked.Read(ref next) && value.Bytes != value.Total)
-                return;
-            Interlocked.Exchange(ref next, now + 125);
-            BeginInvoke(() =>
-            {
-                if (operation is null || operation.IsCancellationRequested)
-                    return;
-                progressBar.Value = value.Total == 0 ? 1000 : (int)Math.Clamp(1000.0 * value.Bytes / value.Total, 0, 1000);
-                SetMessage($"{value.Name}   ·   {FormatSize(value.Bytes)} / {FormatSize(value.Total)}");
-            });
-        });
-    }
-
-    private async Task Perform(Func<CancellationToken, Task> work)
+    private async Task Run(Func<CancellationToken, Task> work, bool transfer = false)
     {
         if (operation is not null)
             return;
-        using var source = new CancellationTokenSource();
-        operation = source;
-        progressBar.Value = 0;
-        SetMessage("Bezig…");
+        using var token = new CancellationTokenSource();
+        operation = token;
+        transferring = transfer;
         UpdateControls();
-        try { await work(source.Token); }
-        catch (OperationCanceledException) when (source.IsCancellationRequested) { SetMessage("Geannuleerd."); }
-        catch (Exception error) { ShowError(error); }
+        SetFeedback(transfer ? "" : "Loading…");
+        try
+        {
+            await work(token.Token);
+            if (feedback.Text == "Loading…")
+                SetFeedback("");
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            SetFeedback("Transfer cancelled.");
+        }
+        catch (Exception error)
+        {
+            transfers.Log(error.Message);
+            SetFeedback(error.Message, error: true);
+        }
         finally
         {
             operation = null;
+            transferring = false;
             UpdateControls();
-            if (exitAfterOperation)
+            if (closeWhenIdle)
                 BeginInvoke(Close);
         }
+    }
+
+    private void CancelTransfer()
+    {
+        if (operation is null || !transferring)
+            return;
+        operation.Cancel();
+        UpdateControls();
+        SetFeedback("Cancelling transfer and cleaning up temporary files…");
     }
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
@@ -398,48 +337,31 @@ internal sealed class MainWindow : Form
         if (operation is null)
             return;
         e.Cancel = true;
-        exitAfterOperation = true;
-        RequestCancel();
-    }
-
-    private void RequestCancel()
-    {
-        operation?.Cancel();
-        cancel.Enabled = false;
-        SetMessage("Wachten tot de bewerking en het opruimen klaar zijn…");
+        closeWhenIdle = true;
+        CancelTransfer();
     }
 
     private void UpdateControls()
     {
         bool idle = operation is null;
         bool online = archive is not null;
-        username.Enabled = password.Enabled = remember.Enabled = forget.Enabled = idle && !online;
-        connect.Enabled = idle;
-        connect.Text = online ? "Verbreken" : "Verbinden";
-        connection.Text = online ? "SFTP verbonden" : "Niet verbonden";
-        localList.Enabled = drives.Enabled = archiveShortcut.Enabled = localGo.Enabled = localAddress.Enabled = idle;
-        localUp.Enabled = idle && localPath.Length > 0 && Directory.GetParent(localPath) is not null;
-        remoteList.Enabled = remoteRefresh.Enabled = newFolder.Enabled = idle && online;
-        remoteUp.Enabled = idle && online && remotePath.Length > archive!.Root.Length;
-        bool localFile = Selected(localList) is { IsDirectory: false };
-        bool remoteFile = Selected(remoteList) is { IsDirectory: false };
-        probe.Enabled = idle && online && localFile;
-        upload.Enabled = probe.Enabled;
-        state.Enabled = idle && online && remoteFile;
-        download.Enabled = state.Enabled && localPath.Length > 0;
-        cancel.Enabled = operation is { IsCancellationRequested: false };
+        signIn.Text = online ? "Sign out" : "Sign in";
+        signIn.Enabled = idle;
+        connection.Text = online ? "●  SFTP connected  ·  " + ArchiveSession.Host : "Disconnected";
+        connection.ForeColor = online ? DarkTheme.Mint : DarkTheme.Muted;
+        windows.SetAvailable(idle, windows.HasFolder);
+        surf.SetAvailable(idle, online && surf.HasFolder);
+        upload.Enabled = idle && surf.HasFolder && windows.SelectedFiles.Count > 0;
+        download.Enabled = idle && windows.HasFolder && surf.SelectedFiles.Count > 0;
+        probe.Enabled = idle && online && windows.SelectedFiles.Count == 1;
+        status.Enabled = idle && surf.SelectedFiles.Count > 0;
+        newFolder.Enabled = idle && surf.HasFolder;
+        transfers.SetCancelEnabled(transferring && operation is { IsCancellationRequested: false });
     }
 
-    private void Log(string line)
+    private void SetFeedback(string text, bool error = false)
     {
-        details.AppendText($"[{DateTime.Now:HH:mm:ss}] {line.ReplaceLineEndings(Environment.NewLine)}{Environment.NewLine}");
-    }
-
-    private void SetMessage(string text) => message.Text = text;
-
-    private void ShowError(Exception error)
-    {
-        SetMessage(error.Message);
-        Log(error.Message);
+        feedback.Text = text;
+        feedback.ForeColor = error ? DarkTheme.Error : DarkTheme.Muted;
     }
 }
