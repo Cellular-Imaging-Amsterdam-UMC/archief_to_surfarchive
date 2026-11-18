@@ -293,6 +293,25 @@ internal sealed class ArchiveSession : IDisposable
         await CopyToLocal(client, source, localDirectory, progress, token, maximumSize);
     }
 
+    public async Task<bool> HasRetentionForPreview(string path, CancellationToken token)
+    {
+        using var client = CreateSftpClient();
+        await client.ConnectAsync(token);
+        try
+        {
+            var file = await client.GetAsync(path, token);
+            if (!file.IsRegularFile || file.IsSymbolicLink)
+                throw new IOException("retention.json must be a regular file in this SURF folder.");
+            if (file.Length > RetentionMetadata.MaximumFileSize)
+                throw new IOException("retention.json is too large to preview.");
+            return true;
+        }
+        catch (SftpPathNotFoundException)
+        {
+            return false;
+        }
+    }
+
     public async Task SaveRetention(string directory, string name, string originalSha, byte[] payload,
         IProgress<TransferProgress> progress, CancellationToken token)
     {

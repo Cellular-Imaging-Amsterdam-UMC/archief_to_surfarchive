@@ -244,16 +244,9 @@ internal static class PackageContents
 
     private static void WriteRetention(StreamWriter html, RetentionMetadata retention)
     {
-        html.WriteLine("""<section class="card retention"><h2>Archive retention</h2><dl>""");
-        WriteField("Minimum years to keep", "minimum_years", retention.Fields.Years.ToString(CultureInfo.InvariantCulture));
-        WriteField("Archived on", "archived_on", retention.ArchivedOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
-        WriteField("Keep until", "retain_until", retention.RetainUntil?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
-        WriteField("Project", "project", retention.Fields.Project);
-        WriteField("Contact", "contact", retention.Fields.Contact);
-        WriteField("Contact email", "contact_email", retention.Fields.ContactEmail);
-        WriteField("Notes", "notes", retention.Fields.Notes);
+        html.WriteLine("""<section class="card retention"><h2>Archive retention</h2>""");
+        WriteRetentionValues(html, retention);
         html.WriteLine("""
-            </dl>
             <p>To change these values, double-click <code>retention.json</code> in the SURF pane of <strong>SurfDataArchiveTransfer</strong>, edit the fields and choose <strong>Save to SURF</strong>. If the file is on tape, the editor opens after it is restored.</p>
             <p>This page starts with the values recorded at archiving. To refresh the display after an edit, download the current file and select it below.</p>
             <label for="retention-file">Load current <code>retention.json</code></label><br>
@@ -291,6 +284,19 @@ internal static class PackageContents
             })();
             </script>
             """);
+    }
+
+    public static void WriteRetentionValues(TextWriter html, RetentionMetadata retention)
+    {
+        html.WriteLine("<dl>");
+        WriteField("Minimum years to keep", "minimum_years", retention.Fields.Years.ToString(CultureInfo.InvariantCulture));
+        WriteField("Archived on", "archived_on", retention.ArchivedOn?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        WriteField("Keep until", "retain_until", retention.RetainUntil?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        WriteField("Project", "project", retention.Fields.Project);
+        WriteField("Contact", "contact", retention.Fields.Contact);
+        WriteField("Contact email", "contact_email", retention.Fields.ContactEmail);
+        WriteField("Notes", "notes", retention.Fields.Notes);
+        html.WriteLine("</dl>");
 
         void WriteField(string label, string key, string? value) =>
             html.WriteLine($"<dt>{label}</dt><dd data-retention-field=\"{key}\">{Escape(string.IsNullOrEmpty(value) ? "—" : value)}</dd>");

@@ -289,7 +289,8 @@ internal sealed class TransferLog : UserControl
         if (row.Tag is not TransferJob job)
             return;
         var snapshot = job.Snapshot();
-        bool restoreOnly = job.Tape && snapshot.CopyTime is null;
+        bool restoreOnly = job.Tape && (snapshot.CopyTime is null || snapshot.WaitingForTape
+            || snapshot.State == TransferState.CheckingStatus);
         row.Cells[1].Value = job.Direction;
         row.Cells[2].Value = snapshot.State switch
         {

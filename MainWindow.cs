@@ -411,7 +411,8 @@ internal sealed class MainWindow : Form
     {
         if (archive is not { } session)
             return;
-        string previewAction = RetentionMetadata.IsFileName(item.Name) ? "Open retention" : "Open preview";
+        string previewAction = RetentionMetadata.IsFileName(item.Name) ? "Open retention"
+            : ContentsPreview.IsContents(item.Name) ? "Open contents" : "Open preview";
         string path;
         try { path = ArchiveSession.Child(directory, item.Name); }
         catch (ArgumentException error)
@@ -456,37 +457,20 @@ internal sealed class MainWindow : Form
     {
         TransferJob job = activity.Job;
         CancellationToken token = activity.Cancellation.Token;
-        bool checkComplete = false;
         string? local = null;
         bool opened = false;
-        var progress = new Progress<RestoreUpdate>(update =>
-        {
-            if (IsDisposed || token.IsCancellationRequested || checkComplete)
-                return;
-            job.SetPhase(update.Phase);
-            transfers.Log(update.Message, job);
-            if (surf.PathShown == directory && update.State is { } state)
-            {
-                surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
-                UpdateControls();
-            }
-        });
         try
         {
-            var state = await Task.Run(() => session.MonitorRestore(path, ((IProgress<RestoreUpdate>)progress).Report,
-                activity.Polling.WaitForNextCheck, token));
-            checkComplete = true;
-            token.ThrowIfCancellationRequested();
+            await WaitForDisk(path, job.Name);
             if (IsDisposed)
                 return;
-            if (surf.PathShown == directory)
-                surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
 
             if (activity.Polling.OpenWhenReady)
             {
                 bool editRetention = RetentionMetadata.IsFileName(job.Name);
+                bool openContents = ContentsPreview.IsContents(job.Name);
                 local = FilePreview.CreateTemporaryFolder();
-                transfers.Log("SURF confirmed the file is on disk. Downloading a temporary copy.", job);
+                transfers.Log($"Downloading a temporary copy of {job.Name}.", job);
                 await Task.Run(() => session.DownloadPreview(path, local, new Callback<TransferProgress>(job.Report), token,
                     editRetention ? RetentionMetadata.MaximumFileSize : null));
                 token.ThrowIfCancellationRequested();
@@ -498,6 +482,17 @@ internal sealed class MainWindow : Form
                     await OpenRetention(session, directory, path, localPath, job, token);
                     return;
                 }
+                if (openContents)
+                {
+                    transfers.Log("Checking the current retention.json before opening contents.html.", job);
+                    var (metadata, status) = await ReadCompanionRetention(local);
+                    bool rendered = await Task.Run(() => ContentsPreview.AddRetention(localPath, metadata, status, token));
+                    if (!rendered && !IsDisposed)
+                        transfers.Log("This contents.html format does not support the retention preview.", job);
+                }
+                token.ThrowIfCancellationRequested();
+                if (IsDisposed)
+                    return;
                 FilePreview.Open(localPath);
                 opened = true;
                 transfers.Log("Opened the temporary local copy.", job);
@@ -538,6 +533,81 @@ internal sealed class MainWindow : Form
             activity.Cancellation.Dispose();
             if (!IsDisposed)
                 UpdateControls();
+        }
+
+        async Task WaitForDisk(string remotePath, string name)
+        {
+            bool checking = true;
+            IProgress<RestoreUpdate> progress = new Progress<RestoreUpdate>(update =>
+            {
+                if (!checking || IsDisposed || token.IsCancellationRequested)
+                    return;
+                job.SetPhase(update.Phase);
+                transfers.Log($"{name} · {update.Message}", job);
+                if (update.State is { } state)
+                    ApplyStatus(name, state);
+            });
+            try
+            {
+                var state = await Task.Run(() => session.MonitorRestore(remotePath, progress.Report,
+                    activity.Polling.WaitForNextCheck, token));
+                token.ThrowIfCancellationRequested();
+                ApplyStatus(name, state);
+            }
+            finally
+            {
+                checking = false;
+            }
+        }
+
+        void ApplyStatus(string name, ArchiveState state)
+        {
+            if (IsDisposed || surf.PathShown != directory)
+                return;
+            surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [name] = state }, finish: false);
+            UpdateControls();
+        }
+
+        async Task<(RetentionMetadata? Metadata, string Status)> ReadCompanionRetention(string localFolder)
+        {
+            const string name = RetentionMetadata.FileName;
+            string remotePath = ArchiveSession.Child(directory, name);
+            string localPath = Path.Combine(localFolder, name);
+            job.SetPhase(TransferState.CheckingStatus);
+            if (operation is null)
+                SetFeedback("Checking retention.json before opening contents.html…");
+            try
+            {
+                bool exists = await Task.Run(() => session.HasRetentionForPreview(remotePath, token));
+                token.ThrowIfCancellationRequested();
+                if (!exists)
+                {
+                    const string missing = "This SURF folder has no retention.json.";
+                    transfers.Log(missing, job);
+                    return (null, missing);
+                }
+
+                await WaitForDisk(remotePath, name);
+                var metadata = await Task.Run(async () =>
+                {
+                    await session.DownloadPreview(remotePath, localFolder, new Callback<TransferProgress>(_ => { }), token,
+                        RetentionMetadata.MaximumFileSize);
+                    return RetentionMetadata.Read(localPath).Metadata;
+                });
+                token.ThrowIfCancellationRequested();
+                transfers.Log("Read the current retention.json from the same SURF folder.", job);
+                return (metadata, "Read from retention.json in this SURF folder when the preview was opened.");
+            }
+            catch (Exception error) when (!token.IsCancellationRequested)
+            {
+                if (!IsDisposed)
+                    transfers.Log($"Could not read retention.json. {error.Message}", job);
+                return (null, "The current retention.json could not be read. See Activity in SurfDataArchiveTransfer.");
+            }
+            finally
+            {
+                File.Delete(localPath);
+            }
         }
     }
 
