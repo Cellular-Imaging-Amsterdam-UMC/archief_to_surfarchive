@@ -1,6 +1,4 @@
-using System.Formats.Tar;
 using System.IO.Compression;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -13,7 +11,7 @@ internal enum PackageStep { Archive = 1, Verify, RemoveOriginals, Upload, Remote
 internal record PackageMeter(PackageStep Step, long Done, long Total, bool CountItems = false,
     bool Finished = false, bool Skipped = false, bool TotalKnown = true);
 internal record PackageManifest(string ArchiveRoot, string Destination, string Name, ArchivePart[] Parts,
-    string? FolderName = null, bool IncludesRetention = false)
+    string? FolderName = null, bool IncludesRetention = false, bool SplitZip = false)
 {
     [JsonIgnore]
     public string RemoteName => FolderName ?? Name;
@@ -70,7 +68,7 @@ internal static class ArchivePackage
         }
     }
 
-    public static string VolumeName(string archiveName, int number)
+    public static string VolumeName(string archiveName, int number, bool splitZip = true)
     {
         var stem = new StringBuilder();
         int bytes = 0;
@@ -81,7 +79,7 @@ internal static class ArchivePackage
                 break;
             stem.Append(rune.ToString());
         }
-        return $"{stem}-{number:D6}.tar.gz";
+        return splitZip ? $"{stem}.zip.{number:D3}" : $"{stem}-{number:D6}.tar.gz";
     }
 
     public static void ValidateFolderName(string name)
@@ -112,26 +110,27 @@ internal static class ArchivePackage
             ArchivePart[] parts;
             try
             {
-                var volumes = WriteTar(folder, archiveName, plan, hashes, partLimit, report, token,
+                var volumes = WriteZip(folder, archiveName, plan, hashes, partLimit, report, token,
                     part => channel.Writer.TryWrite(part));
                 using (var frozen = FreezeParts(folder, volumes))
                 {
-                    VerifyTar(folder, plan, volumes, hashes, report, token);
+                    VerifyZip(folder, plan, volumes, hashes, report, token);
                     var contents = PackageContents.Write(folder, archiveName, plan, volumes, options.Retention, report, token);
                     using var frozenContents = FreezeParts(folder, contents);
                     parts = [.. volumes, .. contents];
-                    SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName, IncludesRetention: true));
+                    SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName,
+                        IncludesRetention: true, SplitZip: true));
                     Interlocked.Exchange(ref exactTotal, parts.Sum(part => part.Size));
                     foreach (var item in contents)
                         channel.Writer.TryWrite(item);
                     channel.Writer.TryComplete();
-                    // A failed upload leaves the originals as well as the verified local package.
                     await upload;
+                    // Keep the originals until all remote parts and metadata files match.
+                    await VerifyRemote(parts, target, report, token);
                     if (options.RemoveOriginals)
                         RemoveOriginals(plan, hashes, report, token);
                     else
                         report(new(PackageStep.RemoveOriginals, 0, 0, CountItems: true, Finished: true, Skipped: true));
-                    await VerifyRemote(parts, target, report, token);
                 }
             }
             finally
@@ -195,14 +194,14 @@ internal static class ArchivePackage
         FinishFolder(folder);
     }
 
-    private static ArchivePart[] WriteTar(string folder, string archiveName, PackagePlan plan, Dictionary<string, string> hashes,
+    private static ArchivePart[] WriteZip(string folder, string archiveName, PackagePlan plan, Dictionary<string, string> hashes,
         long partLimit, Action<PackageMeter> report, CancellationToken token, Action<ArchivePart> sealedVolume)
     {
         bool countItems = plan.Bytes == 0;
         long total = countItems ? plan.Entries.Count : plan.Bytes, done = 0;
         report(new(PackageStep.Archive, 0, total, countItems));
         using var volumes = new VolumeWriter(folder, archiveName, partLimit, sealedVolume);
-        using (var tar = new TarWriter(volumes, TarEntryFormat.Pax, leaveOpen: true))
+        using (var zip = new ZipArchive(volumes, ZipArchiveMode.Create, leaveOpen: true, entryNameEncoding: Encoding.UTF8))
         {
             foreach (var item in plan.Entries)
             {
@@ -211,13 +210,13 @@ internal static class ArchivePackage
                 if (attributes.HasFlag(FileAttributes.Directory) != item.IsDirectory)
                     throw new IOException($"The source changed while packing: {item.Path}");
                 PackageFiles.EnsureDefaultDataStream(item.Path);
-                var entry = new PaxTarEntry(item.IsDirectory ? TarEntryType.Directory : TarEntryType.RegularFile, item.Name)
-                {
-                    ModificationTime = new DateTimeOffset(item.Modified)
-                };
+                var entry = zip.CreateEntry(item.Name, item.IsDirectory ? CompressionLevel.NoCompression : CompressionLevel.Optimal);
+                var modified = new DateTimeOffset(item.Modified).ToLocalTime();
+                if (modified.Year is >= 1980 and <= 2107)
+                    entry.LastWriteTime = modified;
                 if (item.IsDirectory)
                 {
-                    tar.WriteEntry(entry);
+                    entry.ExternalAttributes = (int)FileAttributes.Directory;
                     if (countItems)
                         report(new(PackageStep.Archive, ++done, total, countItems));
                     continue;
@@ -229,8 +228,8 @@ internal static class ArchivePackage
                     throw new IOException($"The source changed while packing: {item.Path}");
                 using var checker = new HashingFileStream(input,
                     count => report(new(PackageStep.Archive, done += count, total)), token);
-                entry.DataStream = checker;
-                tar.WriteEntry(entry);
+                using (var output = entry.Open())
+                    checker.CopyTo(output, 1 << 20);
                 if (checker.ReadBytes != item.Size)
                     throw new IOException($"The source was not fully copied: {item.Path}");
                 hashes.Add(item.Name, checker.Finish());
@@ -243,36 +242,36 @@ internal static class ArchivePackage
         return parts;
     }
 
-    private static void VerifyTar(string folder, PackagePlan plan, ArchivePart[] parts,
+    private static void VerifyZip(string folder, PackagePlan plan, ArchivePart[] parts,
         Dictionary<string, string> hashes, Action<PackageMeter> report, CancellationToken token)
     {
-        long total = parts.Sum(part => part.Size), done = 0;
+        long total = checked(parts.Sum(part => part.Size) + plan.Bytes), done = 0;
         report(new(PackageStep.Verify, 0, total));
-        using var volumes = new VolumeReader(folder, parts, count => report(new(PackageStep.Verify, done += count, total)), token);
-        using var gzip = new GZipStream(volumes, CompressionMode.Decompress, leaveOpen: true);
-        using var reader = new TarReader(gzip, leaveOpen: true);
+        using (var checksumReader = new VolumeReader(folder, parts, Count, token))
+            Drain(checksumReader);
+        using var volumes = new ZipVolumeReader(folder, parts, token);
+        using var zip = new ZipArchive(volumes, ZipArchiveMode.Read);
+        if (zip.Entries.Count != plan.Entries.Count)
+            throw new IOException("The ZIP archive has an unexpected number of entries.");
         var buffer = new byte[1 << 20];
-        foreach (var expected in plan.Entries)
+        for (int i = 0; i < plan.Entries.Count; i++)
         {
             token.ThrowIfCancellationRequested();
-            TarEntry? entry = reader.GetNextEntry(copyData: false);
-            if (entry is null || entry.Name != expected.Name ||
-                entry.EntryType != (expected.IsDirectory ? TarEntryType.Directory : TarEntryType.RegularFile) ||
-                entry.Length != expected.Size)
-                throw new IOException($"Could not verify TAR entry {expected.Name}.");
+            var expected = plan.Entries[i];
+            var entry = zip.Entries[i];
+            if (entry.FullName != expected.Name || entry.Length != expected.Size)
+                throw new IOException($"Could not verify ZIP entry {expected.Name}.");
             if (!expected.IsDirectory)
             {
-                string digest = entry.DataStream is { } data
-                    ? PackageFiles.Hash(data, buffer, token) : Convert.ToHexString(SHA256.HashData([]));
+                using var data = entry.Open();
+                string digest = PackageFiles.Hash(data, buffer, token, Count);
                 if (digest != hashes[expected.Name])
-                    throw new IOException($"The TAR contents do not match {expected.Name}.");
+                    throw new IOException($"The ZIP contents do not match {expected.Name}.");
             }
         }
-        if (reader.GetNextEntry(copyData: false) is not null)
-            throw new IOException("The TAR archive contains unexpected entries.");
-        Drain(gzip);
-        Drain(volumes); // Verify complete compressed volumes, including the final gzip footer.
         report(new(PackageStep.Verify, total, total, Finished: true));
+
+        void Count(int bytes) => report(new(PackageStep.Verify, done += bytes, total));
     }
 
     private static void RemoveOriginals(PackagePlan plan, Dictionary<string, string> hashes,
@@ -392,8 +391,8 @@ internal static class ArchivePackage
         if (!string.Equals(Path.GetFileName(Path.TrimEndingDirectorySeparator(folder)), manifest.Name, StringComparison.OrdinalIgnoreCase)
             || !manifest.Name.StartsWith("SURF-", StringComparison.Ordinal) || manifest.Parts is not { Length: > 0 })
             throw new IOException("This folder is not a verified SURF package.");
-        if (manifest.IncludesRetention && manifest.FolderName is null)
-            throw new IOException("The recovery manifest has invalid retention metadata.");
+        if ((manifest.IncludesRetention && manifest.FolderName is null) || (manifest.SplitZip && !manifest.IncludesRetention))
+            throw new IOException("The recovery manifest has invalid package metadata.");
         string[] sidecars = manifest.IncludesRetention
             ? [PackageContents.TextName, PackageContents.HtmlName, RetentionMetadata.FileName]
             : [PackageContents.TextName, PackageContents.HtmlName];
@@ -409,7 +408,7 @@ internal static class ArchivePackage
         {
             var part = manifest.Parts[i];
             string expected = manifest.FolderName is null ? $"data.tar.part-{i + 1:D6}"
-                : i < volumeCount ? VolumeName(manifest.FolderName, i + 1)
+                : i < volumeCount ? VolumeName(manifest.FolderName, i + 1, manifest.SplitZip)
                 : sidecars[i - volumeCount];
             if (part is null || part.Name != expected || part.Size <= 0 ||
                 (i < volumeCount && part.Size > PartLimit) || part.Sha256 is not { Length: 64 }

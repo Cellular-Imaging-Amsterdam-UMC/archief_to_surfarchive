@@ -85,9 +85,8 @@ internal static class PackageContents
         int folders = plan.Entries.Count(entry => entry.IsDirectory);
         int files = plan.Entries.Count - folders;
         text.WriteLine(name);
-        text.WriteLine($"{files} files, {folders} folders, {plan.Bytes} source bytes, {volumes.Length} compressed TAR parts");
-        text.WriteLine("Restore: download all numbered .tar.gz parts, concatenate them in numeric order and extract the combined stream.");
-        text.WriteLine("From the package directory on Linux or Git Bash: cat -- ./*.tar.gz | tar -xzf -");
+        text.WriteLine($"{files} files, {folders} folders, {plan.Bytes} source bytes, {volumes.Length} ZIP parts");
+        text.WriteLine($"Restore: download all parts to one folder and open {volumes[0].Name} in 7-Zip. Select Extract.");
         text.WriteLine();
         text.WriteLine("Parts in restore order (SHA-256, filename):");
         foreach (var part in volumes)
@@ -114,14 +113,11 @@ internal static class PackageContents
             .metrics span{background:#1c2a39;border:1px solid #34475b;color:#bfcee0;border-radius:100px;padding:.22rem .68rem;font-size:.83rem}
             .card{margin-top:1.05rem;border:1px solid #2d3c4e;border-radius:14px;background:#151f2c;padding:1.15rem}
             .card p{color:#bdcbdb;margin:.5rem 0}.restore li{overflow-wrap:anywhere}
-            .restore h3{font-size:.98rem;margin:1rem 0 .35rem}
             .restore ol{padding-left:1.65rem}
             .restore ol li+li{margin-top:.25rem}
             .omitted{list-style:none;color:#9ab0c6}
             .card a{color:#96ebd1}
             code{background:#213243;border-radius:5px;padding:.14rem .36rem;color:#96ebd1;overflow-wrap:anywhere}
-            pre{max-width:100%;overflow:auto;background:#101720;border-radius:6px;padding:.75rem;font-size:.84rem}
-            pre code{background:none;padding:0;overflow-wrap:normal}
             .retention dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.3rem 1rem;margin:.65rem 0}
             .retention dt{color:#a8bacf}
             .retention dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
@@ -150,46 +146,12 @@ internal static class PackageContents
 
     private static void WriteRestore(StreamWriter html, ArchivePart[] volumes)
     {
-        bool multiple = volumes.Length > 1;
-        string archive = multiple ? "combined.tar.gz" : volumes[0].Name;
-        string extractCommand = $$"""
-            & {
-                New-Item -ItemType Directory -Path .\Restored -ErrorAction Stop
-                tar.exe -xf '.\{{EscapePowerShellString(archive)}}' -C .\Restored
-                if ($LASTEXITCODE -ne 0) { throw 'Extraction failed. Check the tar error above.' }
-            }
-            """;
-        html.WriteLine("""<section class="card restore"><h2>Extract on Windows</h2>""");
-        if (multiple)
-        {
-            html.WriteLine($$"""
-                <p>Download all <strong>{{volumes.Length:N0}} numbered parts</strong> to one Windows folder. The parts form one TAR archive. Join them in number order before extracting.</p>
-                <details><summary>Join the numbered parts in PowerShell</summary>
-                <p>Open PowerShell in the download folder, then paste and run the entire block below. It checks that every numbered part is present and creates <code>combined.tar.gz</code>. Allow extra disk space for this file as well as the extracted data.</p>
-                <pre><code>{{Escape(JoinCommand(volumes))}}</code></pre>
-                </details>
-                """);
-        }
-        else
-        {
-            html.WriteLine($"<p>Download <code>{Escape(archive)}</code>. It is the complete archive and is ready to extract.</p>");
-        }
-
         html.WriteLine($$"""
-            <h3>Windows File Explorer</h3>
+            <section class="card restore"><h2>Extract with 7-Zip on Windows</h2>
             <ol>
-              <li>In Windows 11 File Explorer, right-click <code>{{Escape(archive)}}</code> and choose <strong>Extract All…</strong> if available.</li>
-              <li>Choose a destination folder and select <strong>Extract</strong>. If this produces a <code>.tar</code> file, use <strong>Extract All…</strong> on that file too.</li>
-            </ol>
-            <details><summary>Use the built-in Windows tar command</summary>
-              <p>If File Explorer has no extraction option, run the following in PowerShell from the download folder. This creates an output folder and extracts both layers in one step.</p>
-              <pre><code>{{Escape(extractCommand)}}</code></pre>
-              <p><a href="https://learn.microsoft.com/en-us/windows/tar/">Microsoft's Windows tar documentation</a></p>
-            </details>
-            <h3>7-Zip</h3>
-            <ol>
-              <li>Right-click <code>{{Escape(archive)}}</code> and choose <strong>7-Zip → Extract Here</strong>. On Windows 11, you may need <strong>Show more options</strong> first. This creates a <code>.tar</code> file.</li>
-              <li>Right-click the resulting <code>.tar</code> and choose <strong>7-Zip → Extract files…</strong>. Choose the destination folder and select <strong>OK</strong>. Keep enough free space for the intermediate TAR as well as the extracted data.</li>
+              <li>Download the SURF folder so all <strong>{{volumes.Length:N0}} ZIP parts</strong> are together in one Windows folder. Keep the original filenames.</li>
+              <li>Right-click <code>{{Escape(volumes[0].Name)}}</code> and choose <strong>7-Zip → Extract files…</strong>. On Windows 11, use <strong>Show more options</strong> if needed. You can also select the first part in 7-Zip File Manager and click <strong>Extract</strong>.</li>
+              <li>Choose the destination folder and click <strong>OK</strong>. 7-Zip reads the remaining numbered parts automatically.</li>
             </ol>
             <p><a href="https://www.7-zip.org/">Official 7-Zip website</a></p>
             <details><summary>Archive parts ({{volumes.Length:N0}})</summary>
@@ -209,37 +171,6 @@ internal static class PackageContents
             string attributes = number is { } index ? $" value=\"{index.ToString(CultureInfo.InvariantCulture)}\"" : "";
             html.WriteLine($"<li{attributes}>{Escape(part.Name)} <small>· {TransferJob.FormatBytes(part.Size)}</small></li>");
         }
-    }
-
-    private static string JoinCommand(ArchivePart[] volumes)
-    {
-        string stem = volumes[0].Name[..^"-000001.tar.gz".Length];
-        return $$"""
-            & {
-                $ErrorActionPreference = 'Stop'
-                $folder = (Get-Location).ProviderPath
-                $stem = '{{EscapePowerShellString(stem)}}'
-                $parts = foreach ($n in 1..{{volumes.Length.ToString(CultureInfo.InvariantCulture)}}) {
-                    $item = Join-Path $folder ('{0}-{1:D6}.tar.gz' -f $stem, $n)
-                    if (-not [IO.File]::Exists($item)) { throw "Missing archive part: $item" }
-                    $item
-                }
-                $path = Join-Path $folder 'combined.tar.gz'
-                $output = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
-                try {
-                    try {
-                        foreach ($part in $parts) {
-                            $inputFile = [IO.File]::OpenRead($part)
-                            try { $inputFile.CopyTo($output) } finally { $inputFile.Dispose() }
-                        }
-                    } finally { $output.Dispose() }
-                } catch {
-                    Remove-Item -LiteralPath $path
-                    throw
-                }
-                Write-Output "Ready to extract: $path"
-            }
-            """;
     }
 
     private static void WriteRetention(StreamWriter html, RetentionMetadata retention)
@@ -300,14 +231,6 @@ internal static class PackageContents
 
         void WriteField(string label, string key, string? value) =>
             html.WriteLine($"<dt>{label}</dt><dd data-retention-field=\"{key}\">{Escape(string.IsNullOrEmpty(value) ? "—" : value)}</dd>");
-    }
-
-    private static string EscapePowerShellString(string value)
-    {
-        // PowerShell also parses typographic single quotes as string delimiters.
-        foreach (char quote in "'\u2018\u2019\u201a\u201b")
-            value = value.Replace(quote.ToString(), new string(quote, 2), StringComparison.Ordinal);
-        return value;
     }
 
     private static string Escape(string value) => WebUtility.HtmlEncode(value);

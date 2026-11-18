@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.IO.Compression;
 
 namespace SurfArchive;
 
@@ -23,9 +22,6 @@ internal sealed class VolumeWriter(string folder, string archiveName, long maxim
     private FileStream? stream;
     private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private readonly List<ArchivePart> parts = [];
-    private readonly byte[] block = new byte[(int)Math.Min(maximum / 4, 4 * 1024 * 1024)];
-    private readonly MemoryStream compressed = new();
-    private int buffered;
     private string name = "";
     private long length;
     public override bool CanRead => false;
@@ -37,47 +33,26 @@ internal sealed class VolumeWriter(string folder, string archiveName, long maxim
     {
         while (!data.IsEmpty)
         {
-            int count = Math.Min(data.Length, block.Length - buffered);
-            data[..count].CopyTo(block.AsSpan(buffered));
-            buffered += count;
+            if (stream is null)
+            {
+                name = ArchivePackage.VolumeName(archiveName, parts.Count + 1);
+                stream = new FileStream(Path.Combine(folder, name), FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20);
+            }
+            int count = (int)Math.Min(data.Length, maximum - length);
+            var chunk = data[..count];
+            stream.Write(chunk);
+            hash.AppendData(chunk);
+            length += count;
             data = data[count..];
-            if (buffered == block.Length)
-                WriteGzipMember();
+            if (length == maximum)
+                CloseVolume();
         }
     }
 
     public ArchivePart[] Finish()
     {
-        WriteGzipMember();
         CloseVolume();
         return parts.ToArray();
-    }
-
-    private void WriteGzipMember()
-    {
-        if (buffered == 0)
-            return;
-        compressed.SetLength(0);
-        compressed.Position = 0;
-        using (var gzip = new GZipStream(compressed, CompressionLevel.Fastest, leaveOpen: true))
-            gzip.Write(block.AsSpan(0, buffered));
-        buffered = 0;
-        int size = checked((int)compressed.Length);
-        if (size > maximum)
-            throw new IOException("A compressed block exceeds the archive part size.");
-
-        // End a volume before the next complete gzip member would exceed its limit.
-        if (stream is not null && length + size > maximum)
-            CloseVolume();
-        if (stream is null)
-        {
-            name = ArchivePackage.VolumeName(archiveName, parts.Count + 1);
-            stream = new FileStream(Path.Combine(folder, name), FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20);
-        }
-        var member = compressed.GetBuffer().AsSpan(0, size);
-        stream.Write(member);
-        hash.AppendData(member);
-        length += size;
     }
 
     private void CloseVolume()
@@ -99,7 +74,6 @@ internal sealed class VolumeWriter(string folder, string archiveName, long maxim
         {
             stream?.Dispose();
             hash.Dispose();
-            compressed.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -162,9 +136,6 @@ internal sealed class HashingFileStream(FileStream source, Action<int> read, Can
 {
     private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     public long ReadBytes { get; private set; }
-    public override long Length => source.Length;
-    public override long Position { get => source.Position; set => throw new NotSupportedException(); }
-    public override bool CanSeek => true; // TarWriter needs the length up front. Reads below remain sequential.
     public override bool CanRead => true;
     public override bool CanWrite => false;
 
@@ -186,5 +157,77 @@ internal sealed class HashingFileStream(FileStream source, Action<int> read, Can
         if (disposing)
             hash.Dispose();
         base.Dispose(disposing);
+    }
+}
+
+// ZipArchive needs to seek to the central directory at the end of the logical ZIP.
+internal sealed class ZipVolumeReader(string folder, ArchivePart[] parts, CancellationToken token) : SequentialStream
+{
+    private readonly long[] offsets = PartOffsets(parts);
+    private FileStream? current;
+    private int currentIndex = -1;
+    private long position;
+
+    public override bool CanRead => true;
+    public override bool CanWrite => false;
+    public override bool CanSeek => true;
+    public override long Length => offsets[^1];
+    public override long Position
+    {
+        get => position;
+        set => position = value >= 0 ? value : throw new ArgumentOutOfRangeException(nameof(value));
+    }
+
+    public override long Seek(long offset, SeekOrigin origin)
+    {
+        Position = checked(offset + (origin switch
+        {
+            SeekOrigin.Begin => 0,
+            SeekOrigin.Current => position,
+            SeekOrigin.End => Length,
+            _ => throw new ArgumentOutOfRangeException(nameof(origin))
+        }));
+        return position;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+    public override int Read(Span<byte> buffer)
+    {
+        token.ThrowIfCancellationRequested();
+        if (position >= Length || buffer.IsEmpty)
+            return 0;
+        int index = Array.BinarySearch(offsets, position);
+        if (index < 0)
+            index = ~index - 1;
+        if (currentIndex != index)
+        {
+            current?.Dispose();
+            current = File.OpenRead(Path.Combine(folder, parts[index].Name));
+            if (current.Length != parts[index].Size)
+                throw new IOException($"The size of {parts[index].Name} changed.");
+            currentIndex = index;
+        }
+        current!.Position = position - offsets[index];
+        int count = current.Read(buffer[..(int)Math.Min(buffer.Length, offsets[index + 1] - position)]);
+        if (count == 0)
+            throw new EndOfStreamException($"Could not read ZIP volume {parts[index].Name}.");
+        position += count;
+        return count;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            current?.Dispose();
+        base.Dispose(disposing);
+    }
+
+    private static long[] PartOffsets(ArchivePart[] volumes)
+    {
+        var result = new long[volumes.Length + 1];
+        for (int i = 0; i < volumes.Length; i++)
+            result[i + 1] = checked(result[i] + volumes[i].Size);
+        return result;
     }
 }

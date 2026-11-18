@@ -90,15 +90,15 @@ internal static class PackageDialog
         dialog.Controls.Add(layout);
         layout.Controls.Add(DarkTheme.Label("Archive selected data to SURF?", DarkTheme.Heading), 0, 0);
         var explanation = DarkTheme.Label(
-            "Compress with fast gzip and split into numbered parts of up to 200 MB. Finished parts upload while " +
-            "packing continues. The archive includes contents files and retention.json. Local archive parts " +
-            "are removed after every SURF SHA-256 matches. TAR does not preserve Windows permissions.");
+            "Create a ZIP in numbered parts of up to 200 MB. Finished parts upload while packing continues. " +
+            "The archive includes contents files and retention.json. Open the .zip.001 file in 7-Zip to extract it. " +
+            "Windows permissions are outside the ZIP archive.");
         explanation.AutoSize = false;
         explanation.Dock = DockStyle.Fill;
         layout.Controls.Add(explanation, 0, 1);
         var remove = new CheckBox
         {
-            Text = "Remove originals after the local archive is verified and all uploads finish",
+            Text = "Remove originals after the local archive and all SURF SHA-256 checks pass",
             Checked = true, AutoSize = true, ForeColor = DarkTheme.Ink
         };
         layout.Controls.Add(remove, 0, 2);

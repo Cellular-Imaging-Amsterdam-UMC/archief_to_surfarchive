@@ -25,7 +25,7 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         if (entries.Count == 0)
             throw new IOException("Select at least one file or folder.");
         long bytes = entries.Sum(item => item.Size);
-        // Budget for incompressible input, TAR headers, and package metadata.
+        // Budget for incompressible input, archive headers, and package metadata.
         long required = checked(bytes + bytes / 256 + entries.Sum(item => 4096L + 12L * item.Name.Length) + (1L << 20));
         bool fallback = !IsArchiveDrive(source) && PackageFiles.AvailableBytes(source) < (ulong)required;
         string staging = fallback ? PackageFiles.FallbackFolder() : source;
@@ -144,7 +144,7 @@ internal static class PackageFiles
             do
             {
                 if (data.Name != "::$DATA")
-                    throw new IOException($"The original has a named data stream that TAR would not preserve: {path}");
+                    throw new IOException($"The original has a named data stream the archive would not preserve: {path}");
             }
             while (FindNextStreamW(handle, out data));
             int error = Marshal.GetLastWin32Error();

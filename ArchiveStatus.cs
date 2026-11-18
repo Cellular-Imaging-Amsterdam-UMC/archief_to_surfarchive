@@ -10,6 +10,15 @@ internal static class ArchiveStatus
     public static bool IsOnDisk(ArchiveState? state) => state is ArchiveState.REG or ArchiveState.DUL;
     public static bool CanRestore(ArchiveState? state) => state is ArchiveState.OFL or ArchiveState.QUE or ArchiveState.STG;
 
+    public static ArchiveState FolderState(IEnumerable<ArchiveState> states)
+    {
+        var found = states.ToHashSet();
+        foreach (var state in new[] { ArchiveState.OFL, ArchiveState.STG, ArchiveState.QUE, ArchiveState.Unknown })
+            if (found.Contains(state))
+                return state;
+        return ArchiveState.REG;
+    }
+
     public static string Label(ArchiveState state) => state switch
     {
         ArchiveState.REG => "REG · Disk",
@@ -70,6 +79,58 @@ internal sealed class RestorePolling
 
 internal static class TapeRestore
 {
+    public static async Task WaitForFolder(IReadOnlyList<string> files,
+        Func<CancellationToken, Task<Dictionary<string, ArchiveState>>> read,
+        Func<IReadOnlyList<string>, CancellationToken, Task> request, Action<RestoreUpdate> report,
+        Func<CancellationToken, Task> waitForNextCheck, CancellationToken token)
+    {
+        var requested = new HashSet<string>(StringComparer.Ordinal);
+        report(new(TransferState.CheckingStatus, null, $"Checking {files.Count:N0} files in the folder."));
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            var states = await read(token);
+            token.ThrowIfCancellationRequested();
+            var offline = new List<string>();
+            int onDisk = 0;
+            bool staging = false;
+            foreach (string file in files)
+            {
+                var state = KnownStatus(states, file);
+                if (ArchiveStatus.IsOnDisk(state))
+                {
+                    onDisk++;
+                    requested.Remove(file);
+                }
+                else if (state == ArchiveState.OFL && requested.Add(file))
+                    offline.Add(file);
+                else if (state == ArchiveState.STG)
+                    staging = true;
+            }
+
+            string count = $"{onDisk:N0} of {files.Count:N0} files are on disk.";
+            if (onDisk == files.Count)
+            {
+                report(new(TransferState.Ready, null, count));
+                return;
+            }
+            if (offline.Count > 0)
+            {
+                report(new(TransferState.RequestingTape, null, $"{count} Requesting {offline.Count:N0} files from tape."));
+                await request(offline, token);
+            }
+            report(new(staging ? TransferState.RestoringTape : TransferState.TapeQueue, null, count));
+            await waitForNextCheck(token);
+        }
+    }
+
+    public static ArchiveState KnownStatus(IReadOnlyDictionary<string, ArchiveState> states, string path)
+    {
+        if (!states.TryGetValue(path, out var state) || state == ArchiveState.Unknown)
+            throw new IOException($"SURF did not confirm the disk status of {path}. Refresh the folder and try again.");
+        return state;
+    }
+
     public static async Task<ArchiveState> WaitForDisk(Func<CancellationToken, Task<ArchiveState>> read,
         Func<CancellationToken, Task> request, Action<RestoreUpdate> report,
         Func<CancellationToken, Task> waitForNextCheck, CancellationToken token)

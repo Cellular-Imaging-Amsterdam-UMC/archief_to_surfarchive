@@ -7,7 +7,8 @@ using Renci.SshNet.Common;
 namespace SurfArchive;
 
 internal record ArchiveEntry(string Name, bool IsDirectory, long Size, DateTime Modified,
-    ArchiveState? Status = null);
+    ArchiveState? Status = null, bool? HasSubfolders = null);
+internal record FolderArchiveStatus(string Name, ArchiveState State, bool? HasSubfolders);
 internal record TransferProgress(string Name, long Bytes, long Total, bool TotalKnown = true);
 
 internal sealed class ArchiveSession : IDisposable
@@ -106,12 +107,23 @@ internal sealed class ArchiveSession : IDisposable
     public async Task<List<ArchiveEntry>> List(string directory)
     {
         Reconnect();
+        return await ListEntries(sftp, directory, strict: false, CancellationToken.None);
+    }
+
+    private static async Task<List<ArchiveEntry>> ListEntries(SftpClient client, string directory, bool strict,
+        CancellationToken token)
+    {
         var entries = new List<ArchiveEntry>();
-        await foreach (var entry in sftp.ListDirectoryAsync(directory, CancellationToken.None))
+        await foreach (var entry in client.ListDirectoryAsync(directory, token))
         {
-            if (entry.Name is "." or ".." || entry.Name.Any(char.IsControl) || entry.IsSymbolicLink
-                || (!entry.IsDirectory && !entry.IsRegularFile))
+            if (entry.Name is "." or "..")
                 continue;
+            if (entry.Name.Any(char.IsControl) || entry.IsSymbolicLink || (!entry.IsDirectory && !entry.IsRegularFile))
+            {
+                if (strict)
+                    throw new IOException($"This SURF folder contains a link or another unsupported entry: {directory}.");
+                continue;
+            }
             entries.Add(new(entry.Name, entry.IsDirectory, entry.Length, entry.LastWriteTime));
         }
         return entries;
@@ -133,40 +145,127 @@ internal sealed class ArchiveSession : IDisposable
     public async Task<Dictionary<string, ArchiveState>> ReadStatuses(string directory,
         IReadOnlyList<ArchiveEntry> entries, CancellationToken token)
     {
-        var files = entries.Where(entry => !entry.IsDirectory).ToArray();
-        var result = new Dictionary<string, ArchiveState>(StringComparer.Ordinal);
-        if (files.Length == 0)
-            return result;
+        var paths = entries.Where(entry => !entry.IsDirectory).Select(entry => Child(directory, entry.Name)).ToArray();
+        if (paths.Length == 0)
+            return new(StringComparer.Ordinal);
 
         using var ssh = await OpenShellAsync(token);
-        const string command = "daattr -a path,state -d ,";
+        var statuses = await ReadPathStatuses(ssh, paths, token);
+        return statuses.Where(row => row.Key.StartsWith(directory + "/", StringComparison.Ordinal))
+            .ToDictionary(row => row.Key[(directory.Length + 1)..], row => row.Value, StringComparer.Ordinal);
+    }
+
+    private static async Task<Dictionary<string, ArchiveState>> ReadPathStatuses(SshClient ssh,
+        IEnumerable<string> paths, CancellationToken token)
+    {
+        var states = new Dictionary<string, ArchiveState>(StringComparer.Ordinal);
+        foreach (string command in PathCommands("daattr -a path,state -d ,", paths, token))
+        {
+            string output = await RunAsync(ssh, command, token, timeoutSeconds: 60);
+            foreach (var row in ArchiveStatus.ParseRows(output))
+                states[row.Key] = row.Value;
+        }
+        return states;
+    }
+
+    private static IEnumerable<string> PathCommands(string command, IEnumerable<string> paths, CancellationToken token)
+    {
         var batch = new StringBuilder(command);
         int bytes = 0;
-        foreach (var entry in files)
+        foreach (string path in paths)
         {
-            string arg = " " + Quote(Child(directory, entry.Name));
+            token.ThrowIfCancellationRequested();
+            string arg = " " + Quote(path);
             int size = Encoding.UTF8.GetByteCount(arg);
             if (bytes > 0 && bytes + size > 32_000)
             {
-                await ReadBatch();
+                yield return batch.ToString();
                 batch.Clear().Append(command);
                 bytes = 0;
             }
             batch.Append(arg);
             bytes += size;
         }
-        await ReadBatch();
-        return result;
+        if (bytes > 0)
+            yield return batch.ToString();
+    }
 
-        async Task ReadBatch()
+    public async Task<FolderDownload> ScanFolder(string path, string name, CancellationToken token)
+    {
+        using var client = CreateSftpClient();
+        await client.ConnectAsync(token);
+        var root = await client.GetAsync(path, token);
+        if (!root.IsDirectory || root.IsSymbolicLink)
+            throw new IOException($"The SURF folder is no longer a regular directory: {path}.");
+        var entries = await ListEntries(client, path, strict: true, token);
+        return FolderDownload.FromEntries(path, name, entries, token);
+    }
+
+    public async Task ReadFolderStatuses(string directory, IReadOnlyList<ArchiveEntry> entries,
+        IProgress<FolderArchiveStatus> progress, CancellationToken token)
+    {
+        var folders = entries.Where(entry => entry.IsDirectory).ToArray();
+        if (folders.Length == 0)
+            return;
+        using var client = CreateSftpClient();
+        await client.ConnectAsync(token);
+        using var ssh = await OpenShellAsync(token);
+        foreach (var folder in folders)
         {
-            string output = await RunAsync(ssh, batch.ToString(), token, timeoutSeconds: 60);
-            foreach (var row in ArchiveStatus.ParseRows(output))
+            token.ThrowIfCancellationRequested();
+            bool? hasSubfolders = null;
+            try
             {
-                if (row.Key.StartsWith(directory + "/", StringComparison.Ordinal))
-                    result[row.Key[(directory.Length + 1)..]] = row.Value;
+                string path = Child(directory, folder.Name);
+                var children = await ListEntries(client, path, strict: false, token);
+                hasSubfolders = children.Any(entry => entry.IsDirectory);
+                var files = children.Where(entry => !entry.IsDirectory).Select(entry => Child(path, entry.Name)).ToArray();
+                var states = await ReadPathStatuses(ssh, files, token);
+                progress.Report(new(folder.Name, ArchiveStatus.FolderState(files.Select(file => states.GetValueOrDefault(file))),
+                    hasSubfolders));
+            }
+            catch (Exception error) when (!token.IsCancellationRequested && error is SshException or IOException)
+            {
+                progress.Report(new(folder.Name, ArchiveState.Unknown, hasSubfolders));
             }
         }
+    }
+
+    public async Task<int> CountFolderFilesToRestore(FolderDownload folder, CancellationToken token)
+    {
+        if (folder.Files.Count == 0)
+            return 0;
+        using var ssh = await OpenShellAsync(token);
+        var paths = folder.Files.Select(file => file.RemotePath).ToArray();
+        var states = await ReadPathStatuses(ssh, paths, token);
+        return paths.Count(path => !ArchiveStatus.IsOnDisk(TapeRestore.KnownStatus(states, path)));
+    }
+
+    public async Task RestoreFolder(FolderDownload folder, Action<RestoreUpdate> report, CancellationToken token)
+    {
+        if (folder.Files.Count == 0)
+            return;
+        using var ssh = await OpenShellAsync(token);
+        var paths = folder.Files.Select(file => file.RemotePath).ToArray();
+        await TapeRestore.WaitForFolder(paths, ct => ReadPathStatuses(ssh, paths, ct), async (offline, ct) =>
+        {
+            foreach (string command in PathCommands("daget -a", offline, ct))
+                await RunAsync(ssh, command, ct, timeoutSeconds: 90);
+        }, report, ct => Task.Delay(RestorePolling.ManualInterval, ct), token);
+    }
+
+    public async Task DownloadFolder(FolderDownload folder, string destination,
+        IProgress<TransferProgress> progress, CancellationToken token)
+    {
+        Reconnect();
+        using var ssh = folder.Files.Count > 0 ? await OpenShellAsync(token) : null;
+        await folder.CopyTo(destination, async (file, local, itemProgress, ct) =>
+        {
+            var state = await ReadState(ssh!, Quote(file.RemotePath), ct);
+            if (!ArchiveStatus.IsOnDisk(state))
+                throw new IOException($"A file is no longer on disk: {file.RemotePath}. Restore the folder before retrying.");
+            await CopyToLocal(sftp, file.RemotePath, local, itemProgress, ct, expectedSize: file.Size);
+        }, progress, token);
     }
 
     public void Remove(string directory, ArchiveEntry entry)
@@ -368,18 +467,22 @@ internal sealed class ArchiveSession : IDisposable
     }
 
     private static async Task CopyToLocal(SftpClient client, string source, string localDirectory,
-        IProgress<TransferProgress> progress, CancellationToken token, long? maximumSize = null)
+        IProgress<TransferProgress> progress, CancellationToken token, long? maximumSize = null, long? expectedSize = null)
     {
         token.ThrowIfCancellationRequested();
         string name = source[(source.LastIndexOf('/') + 1)..];
-        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || name.EndsWith(' ') || name.EndsWith('.'))
-            throw new IOException($"Windows does not support the filename '{name}'.");
+        FolderDownload.ValidateWindowsName(name);
         string target = Path.Combine(localDirectory, name);
         if (Path.Exists(target))
             throw new IOException($"A local file or folder named '{name}' already exists.");
 
         string staging = Path.Combine(localDirectory, ".surfarchive-download-" + Guid.NewGuid().ToString("N"));
-        long size = client.GetAttributes(source).Size;
+        var attributes = await client.GetAsync(source, token);
+        if (!attributes.IsRegularFile || attributes.IsSymbolicLink)
+            throw new IOException($"The SURF source is no longer a regular file: {source}.");
+        long size = attributes.Length;
+        if (expectedSize is { } expected && size != expected)
+            throw new IOException($"The SURF file changed size since the folder was scanned: {source}.");
         if (maximumSize is { } limit && size > limit)
             throw new IOException("The retention file is too large to edit.");
         var report = new Callback<DownloadFileProgressReport>(value =>

@@ -455,8 +455,9 @@ internal sealed class BrowserPane : UserControl
             if (!local)
             {
                 row.SubItems.Add(StatusText(item));
-                if (!item.IsDirectory)
-                    row.ToolTipText += Environment.NewLine + StatusText(item);
+                row.ToolTipText += Environment.NewLine + StatusDetails(item);
+                if (item.HasSubfolders == true)
+                    row.ToolTipText += Environment.NewLine + "Has subfolders";
             }
             return row;
         }).ToArray();
@@ -489,32 +490,59 @@ internal sealed class BrowserPane : UserControl
 
     public void ApplyStatuses(IReadOnlyDictionary<string, ArchiveState> states, bool finish)
     {
-        if (local)
-            return;
-        for (int i = 0; i < entries.Count; i++)
-            entries[i] = Apply(entries[i]);
-        foreach (ListViewItem row in files.Items)
-        {
-            var entry = Apply((ArchiveEntry)row.Tag!);
-            row.Tag = entry;
-            row.SubItems[3].Text = StatusText(entry);
-            if (!entry.IsDirectory)
-                row.ToolTipText = entry.Name + Environment.NewLine + StatusText(entry);
-        }
-        files.Invalidate();
-
-        ArchiveEntry Apply(ArchiveEntry entry)
+        UpdateStatuses(entry =>
         {
             if (entry.IsDirectory)
                 return entry;
             if (states.TryGetValue(entry.Name, out var state))
                 return entry with { Status = state };
             return finish && entry.Status is null ? entry with { Status = ArchiveState.Unknown } : entry;
-        }
+        });
     }
 
-    private static string StatusText(ArchiveEntry entry) => entry.IsDirectory ? "—"
-        : entry.Status is { } state ? ArchiveStatus.Label(state) : "Checking…";
+    public void ApplyFolderStatus(FolderArchiveStatus status) =>
+        UpdateStatuses(entry => entry.IsDirectory && entry.Name == status.Name
+            ? entry with { Status = status.State, HasSubfolders = status.HasSubfolders }
+            : entry);
+
+    private void UpdateStatuses(Func<ArchiveEntry, ArchiveEntry> apply)
+    {
+        if (local)
+            return;
+        for (int i = 0; i < entries.Count; i++)
+            entries[i] = apply(entries[i]);
+        foreach (ListViewItem row in files.Items)
+        {
+            var original = (ArchiveEntry)row.Tag!;
+            var entry = apply(original);
+            if (entry == original)
+                continue;
+            row.Tag = entry;
+            row.SubItems[3].Text = StatusText(entry);
+            row.ToolTipText = entry.Name + Environment.NewLine + StatusDetails(entry);
+            if (entry.HasSubfolders == true)
+                row.ToolTipText += Environment.NewLine + "Has subfolders";
+        }
+        files.Invalidate();
+    }
+
+    private static string StatusText(ArchiveEntry entry) => (entry.HasSubfolders, entry.IsDirectory, entry.Status) switch
+    {
+        (true, _, ArchiveState.OFL) => "Tape · Subfolders",
+        (true, _, _) => "Has subfolders",
+        (_, true, ArchiveState.OFL) => "Tape files",
+        _ => StatusDetails(entry)
+    };
+
+    private static string StatusDetails(ArchiveEntry entry) => entry.IsDirectory ? entry.Status switch
+    {
+        ArchiveState.OFL => "Contains tape files",
+        ArchiveState.QUE => "Waiting for disk",
+        ArchiveState.STG => "Restoring files",
+        ArchiveState.REG or ArchiveState.DUL => "Files on disk",
+        ArchiveState.Unknown => "Unknown",
+        _ => "Checking…"
+    } : entry.Status is { } state ? ArchiveStatus.Label(state) : "Checking…";
 
     protected override void Dispose(bool disposing)
     {
