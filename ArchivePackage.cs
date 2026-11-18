@@ -1,8 +1,10 @@
 using System.IO.Compression;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
+using Microsoft.Win32.SafeHandles;
 
 namespace SurfArchive;
 
@@ -37,6 +39,7 @@ internal static class ArchivePackage
 {
     public const long PartLimit = 200_000_000;
     private const string ManifestName = "package.json";
+    private const int SourceLockLimit = 512;
 
     public static string NewName() => $"SURF-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}";
 
@@ -105,33 +108,32 @@ internal static class ArchivePackage
             await target.Prepare(remoteParent, archiveName, resume: false, token);
             var channel = Channel.CreateUnbounded<ArchivePart>(new UnboundedChannelOptions { SingleWriter = true, SingleReader = true });
             using var uploading = CancellationTokenSource.CreateLinkedTokenSource(token);
+            using var originals = options.RemoveOriginals ? new VerifiedFiles() : null;
+            using var frozen = new VerifiedFiles();
             long exactTotal = 0;
             var upload = Task.Run(UploadWhileBuilding);
             ArchivePart[] parts;
             try
             {
-                var volumes = WriteZip(folder, archiveName, plan, hashes, partLimit, report, token,
+                var volumes = WriteZip(folder, archiveName, plan, hashes, originals, partLimit, report, token,
                     part => channel.Writer.TryWrite(part));
-                using (var frozen = FreezeParts(folder, volumes))
-                {
-                    VerifyZip(folder, plan, volumes, hashes, report, token);
-                    var contents = PackageContents.Write(folder, archiveName, plan, volumes, options.Retention, report, token);
-                    using var frozenContents = FreezeParts(folder, contents);
-                    parts = [.. volumes, .. contents];
-                    SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName,
-                        IncludesRetention: true, SplitZip: true));
-                    Interlocked.Exchange(ref exactTotal, parts.Sum(part => part.Size));
-                    foreach (var item in contents)
-                        channel.Writer.TryWrite(item);
-                    channel.Writer.TryComplete();
-                    await upload;
-                    // Keep the originals until all remote parts and metadata files match.
-                    await VerifyRemote(parts, target, report, token);
-                    if (options.RemoveOriginals)
-                        RemoveOriginals(plan, hashes, report, token);
-                    else
-                        report(new(PackageStep.RemoveOriginals, 0, 0, CountItems: true, Finished: true, Skipped: true));
-                }
+                frozen.HoldParts(folder, volumes);
+                VerifyZip(plan, volumes, frozen, hashes, report, token);
+                var contents = PackageContents.Write(folder, archiveName, plan, volumes, options.Retention, report, token, frozen.Hold);
+                parts = [.. volumes, .. contents];
+                SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName,
+                    IncludesRetention: true, SplitZip: true));
+                Interlocked.Exchange(ref exactTotal, parts.Sum(part => part.Size));
+                foreach (var item in contents)
+                    channel.Writer.TryWrite(item);
+                channel.Writer.TryComplete();
+                await upload;
+                // Keep the originals until all remote parts and metadata files match.
+                await VerifyRemote(parts, target, report, token);
+                if (originals is not null)
+                    RemoveOriginals(plan, hashes, originals, report, token);
+                else
+                    report(new(PackageStep.RemoveOriginals, 0, 0, CountItems: true, Finished: true, Skipped: true));
             }
             finally
             {
@@ -141,7 +143,7 @@ internal static class ArchivePackage
                 catch (Exception) { /* Preserve the original error from packing, verification or upload. */ }
             }
 
-            RemoveLocalParts(folder, parts, report, token);
+            RemoveLocalParts(folder, parts, frozen, report, token);
             File.Delete(Path.Combine(folder, ManifestName));
 
             async Task UploadWhileBuilding()
@@ -177,28 +179,29 @@ internal static class ArchivePackage
             if (manifest.ArchiveRoot != target.Root)
                 throw new IOException("This package was prepared for a different SURF account.");
             var available = manifest.Parts.Where(part => File.Exists(Path.Combine(folder, part.Name))).ToArray();
-            using (var frozen = FreezeParts(folder, available))
-            {
-                long total = available.Sum(part => part.Size), read = 0;
-                report(new(PackageStep.Verify, 0, total));
-                using var reader = new VolumeReader(folder, available,
-                    amount => report(new(PackageStep.Verify, read += amount, total)), token);
-                Drain(reader);
-                report(new(PackageStep.Verify, total, total, Finished: true));
-                await target.Prepare(manifest.Destination, manifest.RemoteName, resume: true, token);
-                await Publish(folder, manifest, target, report, token);
-            }
-            RemoveLocalParts(folder, manifest.Parts, report, token);
+            using var frozen = new VerifiedFiles();
+            frozen.HoldParts(folder, available);
+            long total = available.Sum(part => part.Size), read = 0;
+            report(new(PackageStep.Verify, 0, total));
+            VerifyParts(available, frozen, amount => report(new(PackageStep.Verify, read += amount, total)), token);
+            report(new(PackageStep.Verify, total, total, Finished: true));
+            await target.Prepare(manifest.Destination, manifest.RemoteName, resume: true, token);
+            await Publish(folder, manifest, target, report, token);
+            RemoveLocalParts(folder, manifest.Parts, frozen, report, token);
             File.Delete(Path.Combine(folder, ManifestName));
         }
         FinishFolder(folder);
     }
 
     private static ArchivePart[] WriteZip(string folder, string archiveName, PackagePlan plan, Dictionary<string, string> hashes,
-        long partLimit, Action<PackageMeter> report, CancellationToken token, Action<ArchivePart> sealedVolume)
+        VerifiedFiles? originals, long partLimit, Action<PackageMeter> report, CancellationToken token, Action<ArchivePart> sealedVolume)
     {
         bool countItems = plan.Bytes == 0;
         long total = countItems ? plan.Entries.Count : plan.Bytes, done = 0;
+        // Keep a bounded number of read handles, prioritizing the files with the most data to reread.
+        var protect = originals is null ? null : plan.Entries.Where(item => !item.IsDirectory && item.Size > 0)
+            .OrderByDescending(item => item.Size).Take(SourceLockLimit).Select(item => item.Name)
+            .ToHashSet(StringComparer.Ordinal);
         report(new(PackageStep.Archive, 0, total, countItems));
         using var volumes = new VolumeWriter(folder, archiveName, partLimit, sealedVolume);
         using (var zip = new ZipArchive(volumes, ZipArchiveMode.Create, leaveOpen: true, entryNameEncoding: Encoding.UTF8))
@@ -222,17 +225,26 @@ internal static class ArchivePackage
                     continue;
                 }
 
-                using var input = new FileStream(item.Path, FileMode.Open, FileAccess.Read, FileShare.Read,
-                    1 << 20, FileOptions.SequentialScan);
-                if (input.Length != item.Size || File.GetLastWriteTimeUtc(item.Path) != item.Modified)
-                    throw new IOException($"The source changed while packing: {item.Path}");
-                using var checker = new HashingFileStream(input,
-                    count => report(new(PackageStep.Archive, done += count, total)), token);
-                using (var output = entry.Open())
-                    checker.CopyTo(output, 1 << 20);
-                if (checker.ReadBytes != item.Size)
-                    throw new IOException($"The source was not fully copied: {item.Path}");
-                hashes.Add(item.Name, checker.Finish());
+                bool keep = protect?.Contains(item.Name) == true;
+                var share = keep ? FileShare.Read | FileShare.Delete : FileShare.Read;
+                SafeFileHandle? input = File.OpenHandle(item.Path, FileMode.Open, FileAccess.Read, share, FileOptions.SequentialScan);
+                try
+                {
+                    PackageFiles.CheckSource(item, input);
+                    using var checker = new HashingFileStream(input,
+                        count => report(new(PackageStep.Archive, done += count, total)), token);
+                    using (var output = entry.Open())
+                        checker.CopyTo(output, 1 << 20);
+                    if (checker.ReadBytes != item.Size)
+                        throw new IOException($"The source was not fully copied: {item.Path}");
+                    hashes.Add(item.Name, checker.Finish());
+                    if (keep)
+                    {
+                        originals!.Hold(item.Name, input);
+                        input = null;
+                    }
+                }
+                finally { input?.Dispose(); }
                 if (countItems)
                     report(new(PackageStep.Archive, ++done, total, countItems));
             }
@@ -242,14 +254,13 @@ internal static class ArchivePackage
         return parts;
     }
 
-    private static void VerifyZip(string folder, PackagePlan plan, ArchivePart[] parts,
+    private static void VerifyZip(PackagePlan plan, ArchivePart[] parts, VerifiedFiles frozen,
         Dictionary<string, string> hashes, Action<PackageMeter> report, CancellationToken token)
     {
         long total = checked(parts.Sum(part => part.Size) + plan.Bytes), done = 0;
         report(new(PackageStep.Verify, 0, total));
-        using (var checksumReader = new VolumeReader(folder, parts, Count, token))
-            Drain(checksumReader);
-        using var volumes = new ZipVolumeReader(folder, parts, token);
+        VerifyParts(parts, frozen, Count, token);
+        using var volumes = new ZipVolumeReader(parts, frozen.Get, token);
         using var zip = new ZipArchive(volumes, ZipArchiveMode.Read);
         if (zip.Entries.Count != plan.Entries.Count)
             throw new IOException("The ZIP archive has an unexpected number of entries.");
@@ -274,11 +285,26 @@ internal static class ArchivePackage
         void Count(int bytes) => report(new(PackageStep.Verify, done += bytes, total));
     }
 
-    private static void RemoveOriginals(PackagePlan plan, Dictionary<string, string> hashes,
-        Action<PackageMeter> report, CancellationToken token)
+    private static void VerifyParts(ArchivePart[] parts, VerifiedFiles frozen, Action<int> progress, CancellationToken token)
     {
-        long total = plan.Entries.Count, done = 0;
-        report(new(PackageStep.RemoveOriginals, 0, total, CountItems: true));
+        var buffer = new byte[1 << 20];
+        foreach (var part in parts)
+        {
+            token.ThrowIfCancellationRequested();
+            var handle = frozen.Get(part.Name);
+            if (RandomAccess.GetLength(handle) != part.Size)
+                throw new IOException($"The size of {part.Name} changed.");
+            using var input = new HashingFileStream(handle, progress, token);
+            while (input.Read(buffer) > 0) { }
+            if (input.ReadBytes != part.Size || !input.Finish().Equals(part.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new IOException($"Local SHA-256 mismatch for {part.Name}.");
+        }
+    }
+
+    private static void RemoveOriginals(PackagePlan plan, Dictionary<string, string> hashes,
+        VerifiedFiles originals, Action<PackageMeter> report, CancellationToken token)
+    {
+        var progress = new CleanupProgress(PackageStep.RemoveOriginals, plan.Entries.Count, report);
         var buffer = new byte[1 << 20];
         foreach (var entry in plan.Entries.Reverse())
         {
@@ -295,10 +321,13 @@ internal static class ArchivePackage
                 Directory.Delete(entry.Path, recursive: false);
             }
             else
-                PackageFiles.DeleteVerified(entry, hashes[entry.Name], buffer, token);
-            report(new(PackageStep.RemoveOriginals, ++done, total, CountItems: true));
+            {
+                using var verified = originals.Take(entry.Name);
+                PackageFiles.DeleteVerified(entry, hashes[entry.Name], buffer, verified, token);
+            }
+            progress.Processed();
         }
-        report(new(PackageStep.RemoveOriginals, total, total, CountItems: true, Finished: true));
+        progress.Complete();
     }
 
     private static async Task Publish(string folder, PackageManifest manifest, IPackageDestination target,
@@ -343,28 +372,51 @@ internal static class ArchivePackage
         report(new(PackageStep.RemoteSha, total, total, Finished: true));
     }
 
-    private static void RemoveLocalParts(string folder, ArchivePart[] parts,
+    private static void RemoveLocalParts(string folder, ArchivePart[] parts, VerifiedFiles frozen,
         Action<PackageMeter> report, CancellationToken token)
     {
-        long done = 0;
-        report(new(PackageStep.RemoveParts, 0, parts.Length, true));
+        var progress = new CleanupProgress(PackageStep.RemoveParts, parts.Length, report);
         var buffer = new byte[1 << 20];
         foreach (var part in parts)
         {
             token.ThrowIfCancellationRequested();
             string path = Path.Combine(folder, part.Name);
-            if (File.Exists(path))
+            using var verified = frozen.Take(part.Name);
+            if (Path.Exists(path))
                 PackageFiles.DeleteVerified(new(path, part.Name, false, part.Size, File.GetLastWriteTimeUtc(path)),
-                    part.Sha256, buffer, token);
-            report(new(PackageStep.RemoveParts, ++done, parts.Length, true));
+                    part.Sha256, buffer, verified, token);
+            progress.Processed();
         }
-        report(new(PackageStep.RemoveParts, parts.Length, parts.Length, true, true));
+        progress.Complete();
     }
 
-    private static void Drain(Stream input)
+    private sealed class CleanupProgress
     {
-        var buffer = new byte[1 << 20];
-        while (input.Read(buffer) > 0) { }
+        private readonly PackageStep step;
+        private readonly int total;
+        private readonly Action<PackageMeter> report;
+        private long last = Stopwatch.GetTimestamp();
+        private int done;
+
+        public CleanupProgress(PackageStep step, int total, Action<PackageMeter> report)
+        {
+            this.step = step;
+            this.total = total;
+            this.report = report;
+            report(new(step, 0, total, CountItems: true));
+        }
+
+        public void Processed()
+        {
+            done++;
+            if (Stopwatch.GetElapsedTime(last) >= TimeSpan.FromMilliseconds(300))
+            {
+                last = Stopwatch.GetTimestamp();
+                report(new(step, done, total, CountItems: true));
+            }
+        }
+
+        public void Complete() => report(new(step, total, total, CountItems: true, Finished: true));
     }
 
     private static FileStream Lock(string folder) =>
@@ -418,28 +470,23 @@ internal static class ArchivePackage
         return manifest;
     }
 
-    private static PartLocks FreezeParts(string folder, ArchivePart[] parts)
+    private sealed class VerifiedFiles : IDisposable
     {
-        var locks = new PartLocks();
-        try
+        private readonly Dictionary<string, SafeFileHandle> handles = new(StringComparer.Ordinal);
+        public void Hold(string name, SafeFileHandle handle) => handles.Add(name, handle);
+        public SafeFileHandle Get(string name) => handles[name];
+        public SafeFileHandle? Take(string name) => handles.Remove(name, out var handle) ? handle : null;
+
+        public void HoldParts(string folder, ArchivePart[] parts)
         {
             foreach (var part in parts)
-                locks.Handles.Add(File.OpenHandle(Path.Combine(folder, part.Name), FileMode.Open, FileAccess.Read, FileShare.Read));
-            return locks;
+                Hold(part.Name, File.OpenHandle(Path.Combine(folder, part.Name), FileMode.Open, FileAccess.Read,
+                    FileShare.Read | FileShare.Delete));
         }
-        catch
-        {
-            locks.Dispose();
-            throw;
-        }
-    }
 
-    private sealed class PartLocks : IDisposable
-    {
-        public List<Microsoft.Win32.SafeHandles.SafeFileHandle> Handles { get; } = [];
         public void Dispose()
         {
-            foreach (var handle in Handles)
+            foreach (var handle in handles.Values)
                 handle.Dispose();
         }
     }

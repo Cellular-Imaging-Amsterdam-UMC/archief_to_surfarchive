@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace SurfArchive;
@@ -87,10 +88,21 @@ internal static class PackageFiles
 
     public static FileAttributes GetRegularAttributes(string path)
     {
-        var attributes = File.GetAttributes(path);
+        return CheckRegularAttributes(File.GetAttributes(path), path);
+    }
+
+    private static FileAttributes CheckRegularAttributes(FileAttributes attributes, string path)
+    {
         if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Encrypted)) != 0)
             throw new IOException($"Reparse points and encrypted items are not supported: {path}");
         return attributes;
+    }
+
+    public static void CheckSource(PackageEntry entry, SafeFileHandle source)
+    {
+        if (CheckRegularAttributes(File.GetAttributes(source), entry.Path).HasFlag(FileAttributes.Directory)
+            || File.GetLastWriteTimeUtc(source) != entry.Modified || RandomAccess.GetLength(source) != entry.Size)
+            throw new IOException($"The original changed and was saved in place: {entry.Path}");
     }
 
     public static string Hash(Stream input, byte[] buffer, CancellationToken token, Action<int>? read = null)
@@ -107,25 +119,61 @@ internal static class PackageFiles
     }
 
     public static void DeleteVerified(PackageEntry entry, string expectedHash, byte[] buffer,
-        CancellationToken token, Action<int>? read = null)
+        SafeFileHandle? verified, CancellationToken token)
     {
-        // Open for read and delete, denying writers and renames. Mark this same handle only after checking content.
-        if (GetRegularAttributes(entry.Path).HasFlag(FileAttributes.Directory) ||
-            File.GetLastWriteTimeUtc(entry.Path) != entry.Modified)
-            throw new IOException($"The original changed and was saved in place: {entry.Path}");
-
+        // Mark the same handle used to identify the file, without following a replacement junction or symlink.
         using var handle = CreateFileW(LongPath(entry.Path), 0x80010000,
             (uint)FileShare.Read, IntPtr.Zero, 3, 0x08200000, IntPtr.Zero);
         if (handle.IsInvalid)
             throw new IOException($"Could not lock the original for removal: {entry.Path}", new Win32Exception());
-        using var input = new FileStream(handle, FileAccess.Read, 1 << 20, isAsync: false);
+        CheckSource(entry, handle);
         EnsureDefaultDataStream(entry.Path);
-        if (input.Length != entry.Size || Hash(input, buffer, token, read) != expectedHash)
-            throw new IOException($"The original changed and was saved in place: {entry.Path}");
+        bool? same = verified is null ? null : CompareIdentity(verified, handle);
+        if (same == false)
+            throw new IOException($"The original was replaced and was saved in place: {entry.Path}");
+        if (same == true)
+        {
+            MarkForRemoval(handle, entry.Path, token);
+        }
+        else
+        {
+            using var input = new FileStream(handle, FileAccess.Read, bufferSize: 1, isAsync: false);
+            if (Hash(input, buffer, token) != expectedHash)
+                throw new IOException($"The original changed and was saved in place: {entry.Path}");
+            MarkForRemoval(handle, entry.Path, token);
+        }
+    }
+
+    private static void MarkForRemoval(SafeFileHandle handle, string path, CancellationToken token)
+    {
         token.ThrowIfCancellationRequested();
         byte delete = 1;
         if (!SetFileInformationByHandle(handle, 4, ref delete, 1))
-            throw new IOException($"Could not remove the verified original: {entry.Path}", new Win32Exception());
+            throw new IOException($"Could not remove the verified file: {path}", new Win32Exception());
+    }
+
+    private static bool? CompareIdentity(SafeFileHandle first, SafeFileHandle second)
+    {
+        if (ReadIdentity(first) is { } a && ReadIdentity(second) is { } b)
+            return a == b;
+        // Some SMB servers only return the older ID. Use it on NTFS, where the 64-bit ID identifies the file.
+        if (ReadNtfsIdentity(first) is { } olderA && ReadNtfsIdentity(second) is { } olderB)
+            return olderA == olderB;
+        return null;
+    }
+
+    private static FileIdentity? ReadIdentity(SafeFileHandle handle) =>
+        GetFileInformationByHandleEx(handle, 18, out var info, 24) && (info.Low != 0 || info.High != 0) ? info : null;
+
+    private static (uint Volume, ulong Index)? ReadNtfsIdentity(SafeFileHandle handle)
+    {
+        var fileSystem = new StringBuilder(32);
+        if (!GetVolumeInformationByHandleW(handle, null, 0, out _, out _, out _, fileSystem, (uint)fileSystem.Capacity)
+            || !string.Equals(fileSystem.ToString(), "NTFS", StringComparison.OrdinalIgnoreCase)
+            || !GetFileInformationByHandle(handle, out var info))
+            return null;
+        ulong index = ((ulong)info.IndexHigh << 32) | info.IndexLow;
+        return info.Volume != 0 && index != 0 ? (info.Volume, index) : null;
     }
 
     internal static void EnsureDefaultDataStream(string path)
@@ -165,6 +213,24 @@ internal static class PackageFiles
         public string Name;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly record struct FileIdentity(ulong Volume, ulong Low, ulong High);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HandleInformation
+    {
+        public uint Attributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME Created;
+        public System.Runtime.InteropServices.ComTypes.FILETIME Accessed;
+        public System.Runtime.InteropServices.ComTypes.FILETIME Modified;
+        public uint Volume;
+        public uint SizeHigh;
+        public uint SizeLow;
+        public uint Links;
+        public uint IndexHigh;
+        public uint IndexLow;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern IntPtr FindFirstStreamW(string path, int level, out StreamData data, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
@@ -176,6 +242,14 @@ internal static class PackageFiles
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security,
         uint mode, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass,
+        out FileIdentity information, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out HandleInformation information);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern bool GetVolumeInformationByHandleW(SafeFileHandle handle, StringBuilder? volume, uint volumeSize,
+        out uint serial, out uint maximumComponentLength, out uint flags, StringBuilder fileSystem, uint fileSystemSize);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int informationClass,
         ref byte information, uint size);

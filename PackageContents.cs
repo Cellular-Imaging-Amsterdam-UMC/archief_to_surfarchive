@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace SurfArchive;
 
@@ -10,7 +11,8 @@ internal static class PackageContents
     public const string HtmlName = "contents.html";
 
     public static ArchivePart[] Write(string folder, string name, PackagePlan plan, ArchivePart[] volumes,
-        RetentionMetadata retention, Action<PackageMeter> report, CancellationToken token)
+        RetentionMetadata retention, Action<PackageMeter> report, CancellationToken token,
+        Action<string, SafeFileHandle>? holdVerified = null)
     {
         long done = 0, total = plan.Entries.Count;
         report(new(PackageStep.Index, done, total, CountItems: true));
@@ -75,8 +77,21 @@ internal static class PackageContents
 
         ArchivePart Measure(string path)
         {
-            using var input = File.OpenRead(path);
-            return new(Path.GetFileName(path), input.Length, PackageFiles.Hash(input, buffer, token));
+            string filename = Path.GetFileName(path);
+            SafeFileHandle? handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            try
+            {
+                using var input = new HashingFileStream(handle, _ => { }, token);
+                while (input.Read(buffer) > 0) { }
+                var part = new ArchivePart(filename, input.ReadBytes, input.Finish());
+                if (holdVerified is not null)
+                {
+                    holdVerified(filename, handle);
+                    handle = null;
+                }
+                return part;
+            }
+            finally { handle?.Dispose(); }
         }
     }
 
