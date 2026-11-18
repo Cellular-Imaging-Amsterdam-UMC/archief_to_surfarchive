@@ -17,7 +17,7 @@ internal sealed class LoginDialog : Form
     public LoginDialog()
     {
         DarkTheme.Window(this);
-        Text = "Sign in · SURF Archive";
+        Text = "Sign in · SURF Data Archive";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MinimizeBox = MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
@@ -31,7 +31,7 @@ internal sealed class LoginDialog : Form
             layout.RowStyles.Add(new(SizeType.Absolute, height));
         Controls.Add(layout);
         var brand = DarkTheme.Row(DarkTheme.Label("▣", DarkTheme.Brand, DarkTheme.Mint),
-            DarkTheme.Label("   Sign in to SURF Archive", DarkTheme.Brand));
+            DarkTheme.Label("   Sign in to SURF Data Archive", DarkTheme.Brand));
         layout.Controls.Add(brand, 0, 0);
         feedback.Dock = DockStyle.Fill;
         feedback.AutoSize = false;

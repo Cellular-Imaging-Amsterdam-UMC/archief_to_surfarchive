@@ -9,12 +9,14 @@ internal sealed class MainWindow : Form
     private readonly Button upload = DarkTheme.Button("Upload to SURF  →", primary: true);
     private readonly Button download = DarkTheme.Button("←  Download to Windows", primary: true);
     private readonly Button probe = DarkTheme.Button("Test upload");
-    private readonly Button status = DarkTheme.Button("Archive status");
+    private readonly Button removeWindows = DarkTheme.Button("Remove…");
+    private readonly Button removeSurf = DarkTheme.Button("Remove…");
     private readonly Button newFolder = DarkTheme.Button("+ New folder");
     private readonly Label connection = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
     private readonly Label feedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private ArchiveSession? archive;
     private CancellationTokenSource? operation;
+    private CancellationTokenSource? statusLookup;
     private bool transferring;
     private bool closeWhenIdle;
 
@@ -22,7 +24,7 @@ internal sealed class MainWindow : Form
     {
         archive = session;
         DarkTheme.Window(this);
-        Text = "SURF Archive";
+        Text = "SurfDataArchiveTransfer";
         MinimumSize = new Size(1040, 660);
         ClientSize = new Size(1410, 810);
         StartPosition = FormStartPosition.CenterScreen;
@@ -31,20 +33,32 @@ internal sealed class MainWindow : Form
         windows.AddLocation("Archief Active (L:)", LocalFiles.ActiveArchive);
         foreach (string drive in Directory.GetLogicalDrives())
             windows.AddLocation(drive, drive);
+        windows.SetHistory(new RecentFolders(null));
+        if (archive is not null)
+            surf.SetHistory(new RecentFolders(archive.Root));
         windows.Navigate += async (path, root) => await Run(_ => NavigateLocal(path, root));
         surf.Navigate += async (path, root) => await Run(_ => NavigateRemote(path, root));
+        windows.NavigateRecent += async folder => await Run(_ => OpenRecent(folder, local: true));
+        surf.NavigateRecent += async folder => await Run(_ => OpenRecent(folder, local: false));
         windows.SelectionChanged += UpdateControls;
         surf.SelectionChanged += UpdateControls;
         signIn.Click += async (_, _) => await Run(ToggleLogin);
         upload.Click += async (_, _) => await Run(token => Copy(toSurf: true, token), transfer: true);
         download.Click += async (_, _) => await Run(token => Copy(toSurf: false, token), transfer: true);
         probe.Click += async (_, _) => await RunProbe();
-        status.Click += async (_, _) => await Run(ShowArchiveStatus);
+        removeWindows.Click += async (_, _) => await ConfirmRemoval(local: true);
+        removeSurf.Click += async (_, _) => await ConfirmRemoval(local: false);
+        removeWindows.AccessibleName = "Remove selected Windows items";
+        removeSurf.AccessibleName = "Remove selected SURF items";
         newFolder.Click += async (_, _) => await Run(MakeFolder);
         transfers.CancelRequested += CancelTransfer;
         Shown += async (_, _) => await Run(InitialLoad);
         FormClosing += OnClosing;
-        FormClosed += (_, _) => archive?.Dispose();
+        FormClosed += (_, _) =>
+        {
+            StopStatusLookup();
+            archive?.Dispose();
+        };
         UpdateControls();
     }
 
@@ -64,7 +78,7 @@ internal sealed class MainWindow : Form
         header.ColumnStyles.Add(new(SizeType.AutoSize));
         header.ColumnStyles.Add(new(SizeType.AutoSize));
         header.Controls.Add(DarkTheme.Row(DarkTheme.Label("▣", DarkTheme.Brand, DarkTheme.Mint),
-            DarkTheme.Label("  SURF Archive", DarkTheme.Brand)), 0, 0);
+            DarkTheme.Label("  SURF Data Archive", DarkTheme.Brand)), 0, 0);
         connection.Margin = new Padding(0, 7, 17, 0);
         header.Controls.Add(connection, 1, 0);
         header.Controls.Add(signIn, 2, 0);
@@ -83,8 +97,8 @@ internal sealed class MainWindow : Form
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(13, 5, 13, 1) };
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
-        actions.Controls.Add(DarkTheme.Row(upload, probe), 0, 0);
-        actions.Controls.Add(DarkTheme.Row(download, status, newFolder), 1, 0);
+        actions.Controls.Add(DarkTheme.Row(upload, probe, removeWindows), 0, 0);
+        actions.Controls.Add(DarkTheme.Row(download, newFolder, removeSurf), 1, 0);
         layout.Controls.Add(actions, 0, 2);
 
         transfers.Margin = new Padding(13, 0, 13, 0);
@@ -139,6 +153,7 @@ internal sealed class MainWindow : Form
         {
             var entries = await Task.Run(() => archive!.List(path));
             surf.ShowFolder(path, root, entries);
+            _ = LoadArchiveStatuses(path, entries.ToArray());
         }
         catch
         {
@@ -147,12 +162,103 @@ internal sealed class MainWindow : Form
         }
     }
 
+    private async Task OpenRecent(RecentFolder folder, bool local)
+    {
+        BrowserPane pane = local ? windows : surf;
+        string root;
+        string[] parts;
+        if (local)
+        {
+            root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder.RootPath));
+            string relative = Path.GetRelativePath(root, Path.GetFullPath(folder.Path));
+            if (Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith("..\\", StringComparison.Ordinal))
+                throw new IOException("The recent folder is outside its Windows location.");
+            parts = relative == "." ? [] : relative.Split('\\', '/');
+        }
+
+        else
+        {
+            root = archive!.Root;
+            if (folder.RootPath != root || (folder.Path != root && !folder.Path.StartsWith(root + "/", StringComparison.Ordinal)))
+                throw new IOException("The recent folder is outside this SURF archive.");
+            parts = folder.Path == root ? [] : folder.Path[(root.Length + 1)..].Split('/');
+        }
+
+        if (pane.HasKnownFolder(folder.Path))
+        {
+            if (local)
+                await NavigateLocal(folder.Path, null);
+            else
+                await NavigateRemote(folder.Path, null);
+            return;
+        }
+
+        var ancestors = new List<FolderListing>();
+        string path = root;
+        foreach (string part in parts)
+        {
+            var entries = await ReadFolder(path);
+            var match = entries.FirstOrDefault(item => item.IsDirectory && item.Name.Equals(part,
+                local ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal));
+            if (match is null)
+                throw new IOException("A folder on the saved path is missing or unavailable.");
+            ancestors.Add(new(path, entries));
+            path = local ? Path.Combine(path, match.Name) : ArchiveSession.Child(path, match.Name);
+        }
+
+        var content = await ReadFolder(path);
+        pane.ShowFolder(path, folder.RootLabel, content, ancestors);
+        if (!local)
+            _ = LoadArchiveStatuses(path, content.ToArray());
+
+        Task<List<ArchiveEntry>> ReadFolder(string directory) => local
+            ? Task.Run(() => LocalFiles.List(directory))
+            : Task.Run(() => archive!.List(directory));
+    }
+
+    private void StopStatusLookup()
+    {
+        var previous = statusLookup;
+        statusLookup = null;
+        previous?.Cancel();
+    }
+
+    private async Task LoadArchiveStatuses(string path, ArchiveEntry[] entries)
+    {
+        StopStatusLookup();
+        using var lookup = new CancellationTokenSource();
+        statusLookup = lookup;
+        var session = archive!;
+        try
+        {
+            var states = await Task.Run(() => session.ReadStatuses(path, entries, lookup.Token));
+            if (statusLookup == lookup && surf.PathShown == path)
+                surf.ApplyStatuses(states, finish: true);
+        }
+        catch (OperationCanceledException) when (lookup.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            if (statusLookup == lookup && surf.PathShown == path)
+            {
+                surf.ApplyStatuses(new Dictionary<string, ArchiveState>(), finish: true);
+                transfers.Log("Could not load archive statuses. " + error.Message);
+            }
+        }
+        finally
+        {
+            if (statusLookup == lookup)
+                statusLookup = null;
+        }
+    }
+
     private async Task ToggleLogin(CancellationToken _)
     {
         if (archive is not null)
         {
+            StopStatusLookup();
             var currentArchive = archive;
             archive = null;
+            surf.SetHistory(null);
             surf.ClearFolder();
             await Task.Run(currentArchive.Dispose);
             SetFeedback("Signed out of SURF Data Archive.");
@@ -164,11 +270,27 @@ internal sealed class MainWindow : Form
             return;
 
         archive = login.TakeSession();
+        surf.SetHistory(new RecentFolders(archive.Root));
         await NavigateRemote(archive.Root, "My archive");
         SetFeedback("");
     }
 
     private async Task Copy(bool toSurf, CancellationToken token)
+    {
+        if (!toSurf)
+            StopStatusLookup();
+        try
+        {
+            await CopySelection(toSurf, token);
+        }
+        finally
+        {
+            if (!toSurf && !closeWhenIdle && surf.HasFolder)
+                _ = LoadArchiveStatuses(surf.PathShown, surf.SnapshotEntries());
+        }
+    }
+
+    private async Task CopySelection(bool toSurf, CancellationToken token)
     {
         BrowserPane origin = toSurf ? windows : surf;
         BrowserPane target = toSurf ? surf : windows;
@@ -186,13 +308,15 @@ internal sealed class MainWindow : Form
                 if (toSurf)
                     await Task.Run(() => archive!.Upload(source, target.PathShown, progress, token));
                 else
-                    await Task.Run(() => archive!.Download(source, target.PathShown, progress, token));
+                    await Task.Run(() => archive!.Download(source, target.PathShown, progress,
+                        update => Invoke(() => ShowRestore(update, job)), token));
                 transfers.Log("Copy complete. File size verified.", job);
                 transfers.Finish(job, TransferState.Completed);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                transfers.Log("Transfer cancelled.", job);
+                transfers.Log(toSurf ? "Transfer cancelled."
+                    : "Download cancelled. A restore already requested on SURF may still finish.", job);
                 transfers.Finish(job, TransferState.Cancelled);
                 throw;
             }
@@ -209,6 +333,14 @@ internal sealed class MainWindow : Form
         else
             await NavigateLocal(target.PathShown, null);
         SetFeedback(failures == 0 ? "Transfer complete." : $"{failures:N0} transfer(s) failed. See the transfer log.", failures > 0);
+    }
+
+    private void ShowRestore(RestoreUpdate update, TransferJob job)
+    {
+        job.SetPhase(update.Phase);
+        transfers.Log(update.Message, job);
+        if (update.State is { } state)
+            surf.ApplyStatuses(new Dictionary<string, ArchiveState>(StringComparer.Ordinal) { [job.Name] = state }, finish: false);
     }
 
     private async Task RunProbe()
@@ -245,14 +377,42 @@ internal sealed class MainWindow : Form
         }, transfer: true);
     }
 
-    private async Task ShowArchiveStatus(CancellationToken _)
+    private async Task ConfirmRemoval(bool local)
     {
-        foreach (var entry in surf.SelectedFiles)
+        BrowserPane pane = local ? windows : surf;
+        var items = pane.SelectedItems;
+        string directory = pane.PathShown;
+        if (items.Count == 0 || !RemovalDialog.Confirm(this, local, directory, items))
+            return;
+
+        await Run(async _ =>
         {
-            string path = ArchiveSession.Child(surf.PathShown, entry.Name);
-            transfers.Log(await Task.Run(() => archive!.Status(path)));
-        }
-        SetFeedback("Archive status is shown in the transfer log.");
+            int removed = 0;
+            foreach (var item in items)
+            {
+                SetFeedback($"Removing {item.Name}…");
+                try
+                {
+                    if (local)
+                        await Task.Run(() => LocalFiles.Remove(directory, item));
+                    else
+                        await Task.Run(() => archive!.Remove(directory, item));
+                    removed++;
+                    transfers.Log($"Removed from {(local ? "Windows" : "SURF")}: {item.Name}");
+                }
+                catch (Exception error)
+                {
+                    transfers.Log($"Removal failed or incomplete for {item.Name}: {error.Message}");
+                }
+            }
+            if (local)
+                await NavigateLocal(directory, null);
+            else
+                await NavigateRemote(directory, null);
+            int failed = items.Count - removed;
+            string summary = $"Removed {removed:N0} of {items.Count:N0} selected items.";
+            SetFeedback(failed == 0 ? summary : summary + " See the log for incomplete removals.", error: failed > 0);
+        });
     }
 
     private async Task MakeFolder(CancellationToken _)
@@ -354,7 +514,8 @@ internal sealed class MainWindow : Form
         upload.Enabled = idle && surf.HasFolder && windows.SelectedFiles.Count > 0;
         download.Enabled = idle && windows.HasFolder && surf.SelectedFiles.Count > 0;
         probe.Enabled = idle && online && windows.SelectedFiles.Count == 1;
-        status.Enabled = idle && surf.SelectedFiles.Count > 0;
+        removeWindows.Enabled = idle && windows.SelectedItems.Count > 0;
+        removeSurf.Enabled = idle && online && surf.SelectedItems.Count > 0;
         newFolder.Enabled = idle && surf.HasFolder;
         transfers.SetCancelEnabled(transferring && operation is { IsCancellationRequested: false });
     }

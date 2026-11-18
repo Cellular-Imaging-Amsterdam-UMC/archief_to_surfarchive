@@ -1,11 +1,13 @@
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using Renci.SshNet;
 using Renci.SshNet.Common;
 
 namespace SurfArchive;
 
-internal record ArchiveEntry(string Name, bool IsDirectory, long Size, DateTime Modified);
+internal record ArchiveEntry(string Name, bool IsDirectory, long Size, DateTime Modified,
+    ArchiveState? Status = null);
 internal record TransferProgress(string Name, long Bytes, long Total);
 
 internal sealed class ArchiveSession : IDisposable
@@ -74,6 +76,21 @@ internal sealed class ArchiveSession : IDisposable
         }
     }
 
+    private async Task<SshClient> OpenShellAsync(CancellationToken token)
+    {
+        var client = Configure(new SshClient(Connection()));
+        try
+        {
+            await client.ConnectAsync(token);
+            return client;
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+    }
+
     private void Reconnect()
     {
         if (!sftp.IsConnected)
@@ -86,7 +103,8 @@ internal sealed class ArchiveSession : IDisposable
         var entries = new List<ArchiveEntry>();
         await foreach (var entry in sftp.ListDirectoryAsync(directory, CancellationToken.None))
         {
-            if (entry.Name is "." or ".." || entry.IsSymbolicLink || (!entry.IsDirectory && !entry.IsRegularFile))
+            if (entry.Name is "." or ".." || entry.Name.Any(char.IsControl) || entry.IsSymbolicLink
+                || (!entry.IsDirectory && !entry.IsRegularFile))
                 continue;
             entries.Add(new(entry.Name, entry.IsDirectory, entry.Length, entry.LastWriteTime));
         }
@@ -106,10 +124,57 @@ internal sealed class ArchiveSession : IDisposable
         sftp.CreateDirectory(directory);
     }
 
-    public string Status(string file)
+    public async Task<Dictionary<string, ArchiveState>> ReadStatuses(string directory,
+        IReadOnlyList<ArchiveEntry> entries, CancellationToken token)
     {
+        var files = entries.Where(entry => !entry.IsDirectory).ToArray();
+        var result = new Dictionary<string, ArchiveState>(StringComparer.Ordinal);
+        if (files.Length == 0)
+            return result;
+
+        using var ssh = await OpenShellAsync(token);
+        const string command = "daattr -a path,state -d ,";
+        var batch = new StringBuilder(command);
+        int bytes = 0;
+        foreach (var entry in files)
+        {
+            string arg = " " + Quote(Child(directory, entry.Name));
+            int size = Encoding.UTF8.GetByteCount(arg);
+            if (bytes > 0 && bytes + size > 32_000)
+            {
+                await ReadBatch();
+                batch.Clear().Append(command);
+                bytes = 0;
+            }
+            batch.Append(arg);
+            bytes += size;
+        }
+        await ReadBatch();
+        return result;
+
+        async Task ReadBatch()
+        {
+            string output = await RunAsync(ssh, batch.ToString(), token, timeoutSeconds: 60);
+            foreach (var row in ArchiveStatus.ParseRows(output))
+            {
+                if (row.Key.StartsWith(directory + "/", StringComparison.Ordinal))
+                    result[row.Key[(directory.Length + 1)..]] = row.Value;
+            }
+        }
+    }
+
+    public void Remove(string directory, ArchiveEntry entry)
+    {
+        if (directory != Root && !directory.StartsWith(Root + "/", StringComparison.Ordinal))
+            throw new IOException("The folder is outside the personal SURF archive.");
+        Child(directory, entry.Name);
+        string item = Quote("./" + entry.Name);
         using var ssh = OpenShell();
-        return Run(ssh, "dals -l -q " + Quote(file));
+        string type = entry.IsDirectory ? "-d" : "-f";
+        string remove = entry.IsDirectory ? "rm -r --one-file-system -- " : "rm -- ";
+        Run(ssh, $"cd -- {Quote(Root)} && archive_root=$(pwd -P) && cd -- {Quote(directory)} && " +
+            "case \"$(pwd -P)/\" in \"$archive_root/\"*) ;; *) exit 4 ;; esac && " +
+            $"test ! -L {item} && test {type} {item} && {remove}{item}", timeoutSeconds: 300);
     }
 
     private static string Quote(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";
@@ -124,12 +189,24 @@ internal sealed class ArchiveSession : IDisposable
         return output;
     }
 
+    private static async Task<string> RunAsync(SshClient ssh, string commandText,
+        CancellationToken token, int timeoutSeconds = 30)
+    {
+        using var command = ssh.CreateCommand(commandText);
+        command.CommandTimeout = TimeSpan.FromSeconds(timeoutSeconds);
+        await command.ExecuteAsync(token);
+        if (command.ExitStatus != 0)
+            throw new IOException($"SURF returned an error (exit {command.ExitStatus}): {command.Error.Trim()}");
+        return command.Result;
+    }
+
     private async Task CopyUp(FileStream input, string destination, string name,
         IProgress<TransferProgress> progress, CancellationToken token)
     {
         long size = input.Length;
         var report = new Callback<UploadFileProgressReport>(value =>
             progress.Report(new(name, checked((long)value.TotalBytesUploaded), size)));
+        progress.Report(new(name, 0, size));
         await sftp.UploadFileAsync(input, destination, canOverride: false, report, token);
         if (sftp.GetAttributes(destination).Size != size)
             throw new IOException("The file size on SURF differs from the source.");
@@ -170,7 +247,7 @@ internal sealed class ArchiveSession : IDisposable
     }
 
     public async Task Download(string source, string localDirectory,
-        IProgress<TransferProgress> progress, CancellationToken token)
+        IProgress<TransferProgress> progress, Action<RestoreUpdate> restore, CancellationToken token)
     {
         Reconnect();
         string name = source[(source.LastIndexOf('/') + 1)..];
@@ -179,6 +256,18 @@ internal sealed class ArchiveSession : IDisposable
         string target = Path.Combine(localDirectory, name);
         if (Path.Exists(target))
             throw new IOException($"A local file or folder named '{name}' already exists.");
+
+        using (var ssh = await OpenShellAsync(token))
+        {
+            string quoted = Quote(source);
+            await TapeRestore.WaitForDisk(
+                async ct => ArchiveStatus.Parse(await RunAsync(ssh, "daattr -a state " + quoted, ct)),
+                async ct => { await RunAsync(ssh, "daget -a " + quoted, ct, timeoutSeconds: 90); },
+                restore, TimeSpan.FromSeconds(15), token);
+        }
+
+        token.ThrowIfCancellationRequested();
+        Reconnect();
         string staging = Path.Combine(localDirectory, ".surfarchive-download-" + Guid.NewGuid().ToString("N"));
         long size = sftp.GetAttributes(source).Size;
         var report = new Callback<DownloadFileProgressReport>(value =>
@@ -189,6 +278,7 @@ internal sealed class ArchiveSession : IDisposable
         {
             await using (output)
             {
+                progress.Report(new(name, 0, size));
                 await sftp.DownloadFileAsync(source, output, report, token);
                 if (output.Length != size)
                     throw new IOException("The downloaded file size differs from the source.");

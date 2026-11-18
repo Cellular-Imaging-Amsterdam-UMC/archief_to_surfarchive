@@ -1,13 +1,15 @@
 namespace SurfArchive;
 
+internal sealed record FolderListing(string Path, List<ArchiveEntry> Entries);
+
 internal sealed class BrowserPane : UserControl
 {
     private readonly bool local;
-    private readonly TreeView folders = new()
+    private readonly FixedTreeView folders = new()
     {
         Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, HideSelection = false,
-        ShowLines = false, FullRowSelect = true, DrawMode = TreeViewDrawMode.OwnerDrawText,
-        ItemHeight = 25, Indent = 17, PathSeparator = "/"
+        ShowLines = false, FullRowSelect = true, DrawMode = TreeViewDrawMode.OwnerDrawAll,
+        Font = DarkTheme.Small, ItemHeight = 23, Indent = 16, PathSeparator = "/", ShowNodeToolTips = true
     };
     private readonly ListView files = new()
     {
@@ -18,6 +20,13 @@ internal sealed class BrowserPane : UserControl
     private readonly TextBox filter = DarkTheme.Input("Filter folder contents");
     private readonly Button up = DarkTheme.Button("↑ Up");
     private readonly Button reload = DarkTheme.Button("⟳ Refresh");
+    private readonly Button recent = DarkTheme.Button("Recent ▾");
+    private readonly ContextMenuStrip recentMenu = new()
+    {
+        BackColor = DarkTheme.Panel, ForeColor = DarkTheme.Ink, Font = DarkTheme.Small,
+        ShowImageMargin = false, ShowItemToolTips = true,
+        Renderer = new ToolStripProfessionalRenderer(new RecentMenuColors())
+    };
     private readonly Label count = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private readonly SplitContainer split = new() { Dock = DockStyle.Fill, SplitterWidth = 6 };
     private readonly ComboBox locations = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 151, DrawMode = DrawMode.OwnerDrawFixed };
@@ -29,6 +38,7 @@ internal sealed class BrowserPane : UserControl
     private bool updating;
     private bool canNavigate;
     private bool firstLayout = true;
+    private RecentFolders? history;
 
     public BrowserPane(string heading, bool local)
     {
@@ -59,7 +69,8 @@ internal sealed class BrowserPane : UserControl
             CellText(e.Graphics, label, e.Bounds, DarkTheme.Ink, 0);
         };
         storage.Margin = new Padding(0, 6, 13, 0);
-        panel.Controls.Add(local ? DarkTheme.Row(locations, up, reload) : DarkTheme.Row(up, reload, storage), 0, 1);
+        panel.Controls.Add(local ? DarkTheme.Row(locations, up, reload, recent)
+            : DarkTheme.Row(up, reload, recent, storage), 0, 1);
 
         address.Dock = DockStyle.Top;
         address.Margin = Padding.Empty;
@@ -91,6 +102,7 @@ internal sealed class BrowserPane : UserControl
         };
         up.Click += (_, _) => OpenNode(Current?.Parent);
         reload.Click += (_, _) => OpenNode(Current);
+        recent.Click += (_, _) => ShowRecent();
         folders.AfterSelect += (_, _) => OpenNode(folders.SelectedNode);
         folders.BeforeSelect += (_, e) => e.Cancel = !updating && !canNavigate;
         folders.BeforeExpand += (_, e) =>
@@ -133,17 +145,47 @@ internal sealed class BrowserPane : UserControl
     }
 
     public event Action<string, string?>? Navigate;
+    public event Action<RecentFolder>? NavigateRecent;
     public event Action? SelectionChanged;
     public string PathShown { get; private set; } = "";
     public bool HasFolder => Current is not null;
-    public IReadOnlyList<ArchiveEntry> SelectedFiles => files.SelectedItems.Cast<ListViewItem>()
-        .Select(item => (ArchiveEntry)item.Tag!).Where(entry => !entry.IsDirectory).ToArray();
+    public IReadOnlyList<ArchiveEntry> SelectedItems => files.SelectedItems.Cast<ListViewItem>()
+        .Select(item => (ArchiveEntry)item.Tag!).ToArray();
+    public IReadOnlyList<ArchiveEntry> SelectedFiles => SelectedItems.Where(entry => !entry.IsDirectory).ToArray();
+    public ArchiveEntry[] SnapshotEntries() => entries.ToArray();
+    public bool HasKnownFolder(string path) => Find(folders.Nodes, path) is not null;
 
     private TreeNode? Current { get; set; }
 
     public void AddLocation(string label, string path)
     {
         locations.Items.Add(new StorageLocation(label, path));
+    }
+
+    public void SetHistory(RecentFolders? value) => history = value;
+
+    private void ShowRecent()
+    {
+        if (history is not { } currentHistory)
+            return;
+        foreach (var item in recentMenu.Items.Cast<ToolStripItem>().ToArray())
+            item.Dispose();
+        recentMenu.Items.Clear();
+        if (currentHistory.Items.Count == 0)
+            recentMenu.Items.Add(new ToolStripMenuItem("No recent folders") { Enabled = false });
+        foreach (var folder in currentHistory.Items)
+        {
+            string path = folder.Path.Length <= 75 ? folder.Path : "…" + folder.Path[^74..];
+            var item = new ToolStripMenuItem(path.Replace("&", "&&")) { ToolTipText = folder.Path };
+            item.Click += (_, _) => NavigateRecent?.Invoke(folder);
+            recentMenu.Items.Add(item);
+        }
+        if (currentHistory.Items.Count > 0)
+        {
+            recentMenu.Items.Add(new ToolStripSeparator());
+            recentMenu.Items.Add("Clear recent folders", null, (_, _) => currentHistory.Clear());
+        }
+        recentMenu.Show(recent, new Point(0, recent.Height));
     }
 
     private Control TreeLayout()
@@ -166,12 +208,28 @@ internal sealed class BrowserPane : UserControl
         folders.ImageList = icons;
         folders.DrawNode += (_, e) =>
         {
-            Color background = e.Node == Current ? DarkTheme.Selected : DarkTheme.Page;
-            var area = new Rectangle(e.Bounds.X, e.Bounds.Y, Math.Max(e.Bounds.Width, folders.ClientSize.Width - e.Bounds.X), e.Bounds.Height);
+            if (e.Node is not { } node)
+                return;
+            Color background = node == Current ? DarkTheme.Selected : DarkTheme.Page;
+            var area = new Rectangle(0, e.Bounds.Y, folders.ClientSize.Width, e.Bounds.Height);
             using var fill = new SolidBrush(background);
             e.Graphics.FillRectangle(fill, area);
-            TextRenderer.DrawText(e.Graphics, e.Node?.Text ?? "", DarkTheme.Body, area, DarkTheme.Ink,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+            int textLeft = Math.Max(34, node.Bounds.Left);
+            if (textLeft >= area.Right)
+                return;
+            int middle = area.Top + area.Height / 2;
+            if (node.Nodes.Count > 0)
+            {
+                int x = textLeft - 30;
+                using var pen = new Pen(DarkTheme.Muted, 1.4f);
+                Point[] points = node.IsExpanded
+                    ? [new(x - 3, middle - 1), new(x, middle + 2), new(x + 3, middle - 1)]
+                    : [new(x - 1, middle - 3), new(x + 2, middle), new(x - 1, middle + 3)];
+                e.Graphics.DrawLines(pen, points);
+            }
+            DarkTheme.DrawIcon(e.Graphics, new Rectangle(textLeft - 20, middle - 8, 16, 16), folder: true);
+            CellText(e.Graphics, node.Text, new Rectangle(textLeft, area.Y, area.Right - textLeft, area.Height),
+                DarkTheme.Ink, 0);
         };
         return layout;
     }
@@ -193,6 +251,8 @@ internal sealed class BrowserPane : UserControl
         files.Columns.Add("Name", 185);
         files.Columns.Add("Size", 68, HorizontalAlignment.Right);
         files.Columns.Add("Modified", 118);
+        if (!local)
+            files.Columns.Add("Archive status", 112);
         files.Resize += (_, _) => FitFileColumns();
         files.DrawColumnHeader += (_, e) =>
         {
@@ -216,7 +276,14 @@ internal sealed class BrowserPane : UserControl
                 text.X += 20;
                 text.Width -= 20;
             }
-            CellText(e.Graphics, e.SubItem?.Text ?? "", text, e.ColumnIndex == 0 ? DarkTheme.Ink : DarkTheme.Muted, e.ColumnIndex);
+            Color color = e.ColumnIndex switch
+            {
+                0 => DarkTheme.Ink,
+                3 when entry.Status is ArchiveState.REG or ArchiveState.DUL => DarkTheme.Mint,
+                3 when entry.Status is ArchiveState.OFL or ArchiveState.STG or ArchiveState.QUE => DarkTheme.Amber,
+                _ => DarkTheme.Muted
+            };
+            CellText(e.Graphics, e.SubItem?.Text ?? "", text, color, e.ColumnIndex);
         };
         return layout;
     }
@@ -235,7 +302,8 @@ internal sealed class BrowserPane : UserControl
             Navigate?.Invoke(path, null);
     }
 
-    public void ShowFolder(string path, string? rootLabel, List<ArchiveEntry> content)
+    public void ShowFolder(string path, string? rootLabel, List<ArchiveEntry> content,
+        IReadOnlyList<FolderListing>? ancestors = null)
     {
         updating = true;
         folders.BeginUpdate();
@@ -245,8 +313,19 @@ internal sealed class BrowserPane : UserControl
             {
                 folders.Nodes.Clear();
                 Current = folders.Nodes.Add(rootLabel);
-                Current.Tag = path;
-                SelectLocation(path);
+                string rootPath = ancestors is { Count: > 0 } ? ancestors[0].Path : path;
+                Current.Tag = rootPath;
+                SelectLocation(rootPath);
+                if (ancestors is not null)
+                {
+                    for (int i = 0; i < ancestors.Count; i++)
+                    {
+                        RefreshChildren(Current, ancestors[i].Entries);
+                        Current.Expand();
+                        string next = i + 1 < ancestors.Count ? ancestors[i + 1].Path : path;
+                        Current = Current.Nodes.Cast<TreeNode>().First(node => Equals(node.Tag, next));
+                    }
+                }
             }
             else
             {
@@ -262,6 +341,8 @@ internal sealed class BrowserPane : UserControl
             entries = content;
             filter.Clear();
             RenderFiles();
+            if (folders.Nodes[0].Tag is string root)
+                history?.Use(new(path, root, folders.Nodes[0].Text));
         }
         finally
         {
@@ -300,7 +381,7 @@ internal sealed class BrowserPane : UserControl
                 continue;
             string parent = (string)node.Tag!;
             string childPath = local ? Path.Combine(parent, entry.Name) : ArchiveSession.Child(parent, entry.Name);
-            var child = new TreeNode(entry.Name) { Name = entry.Name, Tag = childPath };
+            var child = new TreeNode(entry.Name) { Name = entry.Name, Tag = childPath, ToolTipText = entry.Name };
             child.Nodes.Add("Loading…");
             node.Nodes.Insert(i, child);
         }
@@ -347,6 +428,7 @@ internal sealed class BrowserPane : UserControl
         address.Enabled = idle && (local || available);
         up.Enabled = idle && Current?.Parent is not null;
         reload.Enabled = idle && Current is not null;
+        recent.Enabled = idle && history is not null;
     }
 
     private void RenderFiles()
@@ -357,14 +439,22 @@ internal sealed class BrowserPane : UserControl
         {
             1 => descending ? ordered.ThenByDescending(item => item.Size) : ordered.ThenBy(item => item.Size),
             2 => descending ? ordered.ThenByDescending(item => item.Modified) : ordered.ThenBy(item => item.Modified),
+            3 => descending ? ordered.ThenByDescending(item => item.Status) : ordered.ThenBy(item => item.Status),
             _ => descending ? ordered.ThenByDescending(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
                 : ordered.ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase)
         };
-        var rows = ordered.Select(item => new ListViewItem(new[]
+        var rows = ordered.Select(item =>
         {
-            item.Name, item.IsDirectory ? "Folder" : TransferJob.FormatBytes(item.Size),
-            item.Modified.ToString("dd MMM yy HH:mm")
-        }) { Tag = item, ToolTipText = item.Name }).ToArray();
+            var row = new ListViewItem(new[] { item.Name, item.IsDirectory ? "Folder" : TransferJob.FormatBytes(item.Size),
+                item.Modified.ToString("dd MMM yy HH:mm") }) { Tag = item, ToolTipText = item.Name };
+            if (!local)
+            {
+                row.SubItems.Add(StatusText(item));
+                if (!item.IsDirectory)
+                    row.ToolTipText += Environment.NewLine + StatusText(item);
+            }
+            return row;
+        }).ToArray();
 
         files.BeginUpdate();
         try
@@ -380,19 +470,83 @@ internal sealed class BrowserPane : UserControl
 
     private void FitFileColumns()
     {
-        if (files.ClientSize.Width >= 240)
-            files.Columns[0].Width = Math.Max(80, files.ClientSize.Width - files.Columns[1].Width - files.Columns[2].Width);
+        int width = files.ClientSize.Width;
+        if (width < 240)
+            return;
+        if (!local)
+        {
+            files.Columns[1].Width = Math.Clamp(width * 15 / 100, 49, 70);
+            files.Columns[2].Width = Math.Clamp(width * 24 / 100, 75, 120);
+            files.Columns[3].Width = Math.Clamp(width * 26 / 100, 76, 125);
+        }
+        files.Columns[0].Width = Math.Max(65, width - files.Columns.Cast<ColumnHeader>().Skip(1).Sum(column => column.Width));
     }
+
+    public void ApplyStatuses(IReadOnlyDictionary<string, ArchiveState> states, bool finish)
+    {
+        if (local)
+            return;
+        for (int i = 0; i < entries.Count; i++)
+            entries[i] = Apply(entries[i]);
+        foreach (ListViewItem row in files.Items)
+        {
+            var entry = Apply((ArchiveEntry)row.Tag!);
+            row.Tag = entry;
+            row.SubItems[3].Text = StatusText(entry);
+            if (!entry.IsDirectory)
+                row.ToolTipText = entry.Name + Environment.NewLine + StatusText(entry);
+        }
+        files.Invalidate();
+
+        ArchiveEntry Apply(ArchiveEntry entry)
+        {
+            if (entry.IsDirectory)
+                return entry;
+            if (states.TryGetValue(entry.Name, out var state))
+                return entry with { Status = state };
+            return finish && entry.Status is null ? entry with { Status = ArchiveState.Unknown } : entry;
+        }
+    }
+
+    private static string StatusText(ArchiveEntry entry) => entry.IsDirectory ? "—"
+        : entry.Status is { } state ? ArchiveStatus.Label(state) : "Checking…";
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
             icons.Dispose();
+            recentMenu.Dispose();
+        }
         base.Dispose(disposing);
     }
 
     private sealed record StorageLocation(string Label, string Path)
     {
         public override string ToString() => Label;
+    }
+
+    private sealed class FixedTreeView : TreeView
+    {
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                const int TvsNoHorizontalScroll = 0x8000;
+                var parameters = base.CreateParams;
+                parameters.Style |= TvsNoHorizontalScroll;
+                return parameters;
+            }
+        }
+    }
+
+    private sealed class RecentMenuColors : ProfessionalColorTable
+    {
+        public override Color ToolStripDropDownBackground => DarkTheme.Panel;
+        public override Color MenuBorder => DarkTheme.Border;
+        public override Color MenuItemBorder => DarkTheme.Selected;
+        public override Color MenuItemSelected => DarkTheme.Selected;
+        public override Color SeparatorLight => DarkTheme.Border;
+        public override Color SeparatorDark => DarkTheme.Border;
     }
 }

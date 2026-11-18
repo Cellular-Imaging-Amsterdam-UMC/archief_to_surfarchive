@@ -42,4 +42,20 @@ internal static class LocalFiles
             return false;
         }
     }
+
+    public static void Remove(string directory, ArchiveEntry entry)
+    {
+        if (string.IsNullOrEmpty(entry.Name) || entry.Name is "." or ".."
+            || entry.Name.EndsWith(' ') || entry.Name.EndsWith('.') || entry.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            throw new IOException("Invalid Windows file or folder name.");
+        string path = Path.Combine(directory, entry.Name);
+        var attributes = File.GetAttributes(path);
+        bool isDirectory = attributes.HasFlag(FileAttributes.Directory);
+        if (isDirectory != entry.IsDirectory)
+            throw new IOException("The item changed since it was selected. Refresh the folder and try again.");
+        if (isDirectory)
+            Directory.Delete(path, recursive: !attributes.HasFlag(FileAttributes.ReparsePoint));
+        else
+            File.Delete(path);
+    }
 }

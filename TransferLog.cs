@@ -4,7 +4,8 @@ namespace SurfArchive;
 
 internal enum TransferState
 {
-    Preparing, Transferring, Verifying, Completed, Cancelled, Failed
+    Preparing, CheckingStatus, RequestingTape, TapeQueue, RestoringTape, Transferring, Verifying,
+    Completed, Cancelled, Failed
 }
 
 internal sealed class TransferJob(string name, string direction, string source, string target, long size)
@@ -12,47 +13,70 @@ internal sealed class TransferJob(string name, string direction, string source, 
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly object sync = new();
     private readonly Queue<(double Time, long Bytes)> samples = new();
-    private double? firstProgress;
+    private double? copyStart;
+    private double? copyEnd;
     private double lastProgress;
+    private double lastSample;
     private long copied;
     private long total = Math.Max(size, 0);
 
     public string Name => name;
     public string Direction => direction;
     public List<string> Notes { get; } = [$"Source: {source}", $"Destination: {target}"];
-    public TransferState State { get; set; } = TransferState.Preparing;
-    public bool Active => State is TransferState.Preparing or TransferState.Transferring or TransferState.Verifying;
+    private TransferState state = TransferState.Preparing;
+
+    public void SetPhase(TransferState phase)
+    {
+        lock (sync)
+            state = phase;
+    }
 
     public void Report(TransferProgress update)
     {
         lock (sync)
         {
-            if (update.Bytes < copied)
-                return;
-
-            total = update.Total;
-            if (update.Bytes == copied)
+            if (copyEnd is not null || update.Bytes < copied || state is TransferState.Completed or TransferState.Failed or TransferState.Cancelled)
                 return;
 
             double now = clock.Elapsed.TotalSeconds;
-            if (firstProgress is null)
+            total = update.Total;
+            if (copyStart is null)
             {
-                firstProgress = now;
+                copyStart = now;
+                lastProgress = now;
+                lastSample = now;
                 samples.Enqueue((now, 0));
+                state = TransferState.Transferring;
             }
-            copied = update.Bytes;
-            lastProgress = now;
-            if (samples.Count == 0 || now - samples.Last().Time >= 0.25)
-                samples.Enqueue((now, copied));
-            while (samples.Count > 1 && now - samples.Peek().Time > 5)
-                samples.Dequeue();
+            if (update.Bytes > copied)
+            {
+                copied = update.Bytes;
+                lastProgress = now;
+                if (now - lastSample >= 0.25)
+                {
+                    samples.Enqueue((now, copied));
+                    lastSample = now;
+                }
+                while (samples.Count > 1 && now - samples.Peek().Time > 5)
+                    samples.Dequeue();
+            }
+            if (copied >= total)
+            {
+                copyEnd = now;
+                state = TransferState.Verifying;
+            }
         }
     }
 
-    public void Finish(TransferState state)
+    public void Finish(TransferState outcome)
     {
-        State = state;
-        clock.Stop();
+        lock (sync)
+        {
+            clock.Stop();
+            if (copyStart is not null)
+                copyEnd ??= clock.Elapsed.TotalSeconds;
+            state = outcome;
+        }
     }
 
     public TransferSnapshot Snapshot()
@@ -62,24 +86,14 @@ internal sealed class TransferJob(string name, string direction, string source, 
             var elapsed = clock.Elapsed;
             double now = elapsed.TotalSeconds;
             double speed = 0;
-            if (firstProgress is { } start)
-            {
-                if (State == TransferState.Completed && lastProgress - start >= 0.25)
-                    speed = copied / (lastProgress - start);
-                else if (Active && now - lastProgress <= 5 && samples.TryPeek(out var sample) && now - sample.Time >= 0.5)
-                    speed = Math.Max(0, (copied - sample.Bytes) / (now - sample.Time));
-            }
-
-            var state = State;
-            if (Active && copied > 0)
-                state = copied >= total ? TransferState.Verifying : TransferState.Transferring;
-            if (state == TransferState.Completed)
-                return new(state, total, total, speed, null, elapsed);
-
+            if (state == TransferState.Transferring && now - lastProgress <= 5 &&
+                samples.TryPeek(out var sample) && now - sample.Time >= 0.5)
+                speed = Math.Max(0, (copied - sample.Bytes) / (now - sample.Time));
             TimeSpan? eta = state == TransferState.Transferring && speed > 0 && total > copied
                 ? TimeSpan.FromSeconds(Math.Min(TimeSpan.MaxValue.TotalSeconds / 2, (total - copied) / speed))
                 : null;
-            return new(state, copied, total, speed, eta, elapsed);
+            TimeSpan? copyTime = copyStart is { } start ? TimeSpan.FromSeconds((copyEnd ?? now) - start) : null;
+            return new(state, state == TransferState.Completed ? total : copied, total, speed, eta, copyTime, elapsed);
         }
     }
 
@@ -98,10 +112,11 @@ internal sealed class TransferJob(string name, string direction, string source, 
 }
 
 internal record TransferSnapshot(TransferState State, long Copied, long Total, double Speed,
-    TimeSpan? Eta, TimeSpan Elapsed)
+    TimeSpan? Eta, TimeSpan? CopyTime, TimeSpan Elapsed)
 {
-    public int Percent => State == TransferState.Completed ? 100
+    public int Percent => State is TransferState.Completed or TransferState.Verifying ? 100
         : Total == 0 ? 0 : (int)Math.Clamp(100.0 * Copied / Total, 0, 100);
+    public bool WaitingForTape => State is TransferState.RequestingTape or TransferState.TapeQueue or TransferState.RestoringTape;
 }
 
 internal sealed class TransferLog : UserControl
@@ -170,12 +185,13 @@ internal sealed class TransferLog : UserControl
         };
         AddColumn("File", 210, fill: true);
         AddColumn("Direction", 92);
-        AddColumn("Status", 105);
-        AddColumn("Progress", 150);
-        AddColumn("Transferred", 152);
-        AddColumn("Speed", 94);
-        AddColumn("ETA", 79);
-        AddColumn("Elapsed", 83);
+        AddColumn("Status", 121);
+        AddColumn("Progress", 131);
+        AddColumn("Transferred", 141);
+        AddColumn("Speed", 83);
+        AddColumn("ETA", 68);
+        AddColumn("Copy time", 88);
+        AddColumn("Total time", 75);
         jobs.CellPainting += PaintProgress;
         jobs.SelectionChanged += (_, _) => ShowDetails();
         timer.Tick += (_, _) =>
@@ -257,19 +273,28 @@ internal sealed class TransferLog : UserControl
         if (row.Tag is not TransferJob job)
             return;
         var snapshot = job.Snapshot();
-        row.Cells[2].Value = snapshot.State.ToString();
+        row.Cells[2].Value = snapshot.State switch
+        {
+            TransferState.CheckingStatus => "Checking status",
+            TransferState.RequestingTape => "Requesting tape",
+            TransferState.TapeQueue => "Waiting for tape",
+            TransferState.RestoringTape => "Restoring tape",
+            _ => snapshot.State.ToString()
+        };
         row.Cells[2].Style.ForeColor = snapshot.State switch
         {
             TransferState.Completed => DarkTheme.Mint,
             TransferState.Failed => DarkTheme.Error,
-            TransferState.Cancelled => DarkTheme.Amber,
+            TransferState.Cancelled or TransferState.RequestingTape or TransferState.TapeQueue
+                or TransferState.RestoringTape => DarkTheme.Amber,
             _ => DarkTheme.Ink
         };
-        row.Cells[3].Value = snapshot.Percent;
+        row.Cells[3].Value = snapshot.WaitingForTape ? "Tape restore" : snapshot.Percent;
         row.Cells[4].Value = $"{TransferJob.FormatBytes(snapshot.Copied)} / {TransferJob.FormatBytes(snapshot.Total)}";
         row.Cells[5].Value = snapshot.Speed > 0 ? TransferJob.FormatBytes(snapshot.Speed) + "/s" : "—";
         row.Cells[6].Value = snapshot.Eta is { } eta ? TransferJob.FormatTime(eta + TimeSpan.FromMilliseconds(999)) : "—";
-        row.Cells[7].Value = TransferJob.FormatTime(snapshot.Elapsed);
+        row.Cells[7].Value = snapshot.CopyTime is { } copy ? TransferJob.FormatTime(copy) : "—";
+        row.Cells[8].Value = TransferJob.FormatTime(snapshot.Elapsed);
     }
 
     private void PaintProgress(object? sender, DataGridViewCellPaintingEventArgs e)
