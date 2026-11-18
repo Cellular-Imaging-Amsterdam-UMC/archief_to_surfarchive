@@ -4,6 +4,11 @@ namespace SurfArchive;
 
 internal static class LocalFiles
 {
+    public const long MinimumDirectUpload = 100_000_000;
+
+    public static bool CanUploadDirectly(IReadOnlyList<ArchiveEntry> selection) =>
+        selection.Count > 0 && selection.All(item => !item.IsDirectory && item.Size > MinimumDirectUpload);
+
     public const string ActiveArchive = @"L:\Archief\Active";
 
     private static readonly EnumerationOptions ReadEntries = new()

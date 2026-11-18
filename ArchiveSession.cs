@@ -213,7 +213,8 @@ internal sealed class ArchiveSession : IDisposable
         progress.Report(new(name, size, size));
     }
 
-    public async Task Upload(string source, string directory, IProgress<TransferProgress> progress, CancellationToken token)
+    public async Task Upload(string source, string directory, IProgress<TransferProgress> progress, CancellationToken token,
+        long minimumSizeExclusive = -1)
     {
         Reconnect();
         string name = Path.GetFileName(source);
@@ -222,6 +223,8 @@ internal sealed class ArchiveSession : IDisposable
             throw new IOException($"A file or folder named '{name}' already exists on SURF.");
         string staging = Child(directory, ".surfarchive-upload-" + Guid.NewGuid().ToString("N"));
         using var input = OpenSource(source);
+        if (input.Length <= minimumSizeExclusive)
+            throw new IOException("Direct uploads require files larger than 100 MB. Use Archive to SURF instead.");
 
         try
         {
@@ -357,6 +360,17 @@ internal sealed class ArchiveSession : IDisposable
     public void Dispose() => sftp.Dispose();
 
     public PackageDestination PackageTarget() => new(this);
+
+    public void CheckArchiveDestinations(IReadOnlyList<ArchiveRequest> requests, CancellationToken token)
+    {
+        Reconnect();
+        foreach (var request in requests)
+        {
+            token.ThrowIfCancellationRequested();
+            if (sftp.Exists(request.RemotePath))
+                throw new IOException($"The SURF destination already exists: {request.RemotePath}. Choose a different parent folder or name.");
+        }
+    }
 
     internal sealed class PackageDestination(ArchiveSession session) : IPackageDestination, IDisposable
     {

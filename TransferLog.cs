@@ -5,7 +5,7 @@ namespace SurfArchive;
 internal enum TransferState
 {
     Preparing, CheckingStatus, RequestingTape, TapeQueue, RestoringTape, Transferring, Verifying,
-    Ready, Completed, Cancelled, Failed
+    Ready, Completed, Cancelled, Failed, Skipped
 }
 
 internal sealed class TransferJob(string name, string direction, string source, string target, long size,
@@ -303,8 +303,10 @@ internal sealed class TransferLog : UserControl
                 or TransferState.RestoringTape => DarkTheme.Amber,
             _ => DarkTheme.Ink
         };
-        row.Cells[3].Value = job.Tape ? snapshot.WaitingForTape ? "Tape restore" : "—" : snapshot.Percent;
-        row.Cells[4].Value = job.Tape ? "—" : $"{Format(snapshot.Copied)} / {Format(snapshot.Total)}";
+        row.Cells[3].Value = job.Tape ? snapshot.WaitingForTape ? "Tape restore" : "—"
+            : snapshot.State == TransferState.Skipped ? "—" : snapshot.Percent;
+        row.Cells[4].Value = job.Tape || snapshot.State == TransferState.Skipped
+            ? "—" : $"{Format(snapshot.Copied)} / {Format(snapshot.Total)}";
         row.Cells[5].Value = snapshot.Speed > 0 ? Format(snapshot.Speed) + "/s" : "—";
         row.Cells[6].Value = snapshot.Eta is { } eta ? TransferJob.FormatTime(eta + TimeSpan.FromMilliseconds(999)) : "—";
         row.Cells[7].Value = snapshot.CopyTime is { } copy ? TransferJob.FormatTime(copy) : "—";

@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.IO.Compression;
 
 namespace SurfArchive;
 
@@ -16,11 +17,15 @@ internal abstract class SequentialStream : Stream
     public override void Flush() { }
 }
 
-internal sealed class VolumeWriter(string folder, long maximum, Action<ArchivePart> sealedVolume) : SequentialStream
+internal sealed class VolumeWriter(string folder, string archiveName, long maximum,
+    Action<ArchivePart> sealedVolume) : SequentialStream
 {
     private FileStream? stream;
     private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     private readonly List<ArchivePart> parts = [];
+    private readonly byte[] block = new byte[(int)Math.Min(maximum / 4, 4 * 1024 * 1024)];
+    private readonly MemoryStream compressed = new();
+    private int buffered;
     private string name = "";
     private long length;
     public override bool CanRead => false;
@@ -32,26 +37,47 @@ internal sealed class VolumeWriter(string folder, long maximum, Action<ArchivePa
     {
         while (!data.IsEmpty)
         {
-            if (stream is null)
-            {
-                name = $"data.tar.part-{parts.Count + 1:D6}";
-                stream = new FileStream(Path.Combine(folder, name), FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20);
-            }
-            int count = (int)Math.Min(data.Length, maximum - length);
-            var chunk = data[..count];
-            stream.Write(chunk);
-            hash.AppendData(chunk);
-            length += count;
-            if (length == maximum)
-                CloseVolume();
+            int count = Math.Min(data.Length, block.Length - buffered);
+            data[..count].CopyTo(block.AsSpan(buffered));
+            buffered += count;
             data = data[count..];
+            if (buffered == block.Length)
+                WriteGzipMember();
         }
     }
 
     public ArchivePart[] Finish()
     {
+        WriteGzipMember();
         CloseVolume();
         return parts.ToArray();
+    }
+
+    private void WriteGzipMember()
+    {
+        if (buffered == 0)
+            return;
+        compressed.SetLength(0);
+        compressed.Position = 0;
+        using (var gzip = new GZipStream(compressed, CompressionLevel.Fastest, leaveOpen: true))
+            gzip.Write(block.AsSpan(0, buffered));
+        buffered = 0;
+        int size = checked((int)compressed.Length);
+        if (size > maximum)
+            throw new IOException("A compressed block exceeds the archive part size.");
+
+        // End a volume before the next complete gzip member would exceed its limit.
+        if (stream is not null && length + size > maximum)
+            CloseVolume();
+        if (stream is null)
+        {
+            name = ArchivePackage.VolumeName(archiveName, parts.Count + 1);
+            stream = new FileStream(Path.Combine(folder, name), FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 20);
+        }
+        var member = compressed.GetBuffer().AsSpan(0, size);
+        stream.Write(member);
+        hash.AppendData(member);
+        length += size;
     }
 
     private void CloseVolume()
@@ -73,6 +99,7 @@ internal sealed class VolumeWriter(string folder, long maximum, Action<ArchivePa
         {
             stream?.Dispose();
             hash.Dispose();
+            compressed.Dispose();
         }
         base.Dispose(disposing);
     }

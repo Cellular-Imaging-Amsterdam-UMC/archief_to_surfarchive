@@ -25,7 +25,8 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         if (entries.Count == 0)
             throw new IOException("Select at least one file or folder.");
         long bytes = entries.Sum(item => item.Size);
-        long required = checked(bytes + entries.Sum(item => 4096L + 4L * item.Name.Length) + (1L << 20));
+        // Budget for incompressible input, TAR headers, and the two contents indexes.
+        long required = checked(bytes + bytes / 256 + entries.Sum(item => 4096L + 12L * item.Name.Length) + (1L << 20));
         bool fallback = !IsArchiveDrive(source) && PackageFiles.AvailableBytes(source) < (ulong)required;
         string staging = fallback ? PackageFiles.FallbackFolder() : source;
         if (entries.Any(item => item.IsDirectory && PackageFiles.IsWithin(staging, item.Path)))

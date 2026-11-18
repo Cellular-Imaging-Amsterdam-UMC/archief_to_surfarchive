@@ -1,14 +1,30 @@
 using System.Formats.Tar;
+using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 
 namespace SurfArchive;
 
-internal enum PackageStep { Archive = 1, Verify, RemoveOriginals, Upload, RemoteSha, RemoveParts }
+internal enum PackageStep { Archive = 1, Verify, RemoveOriginals, Upload, RemoteSha, RemoveParts, Index }
 
-internal record PackageMeter(PackageStep Step, long Done, long Total, bool CountItems = false, bool Finished = false);
-internal record PackageManifest(string ArchiveRoot, string Destination, string Name, ArchivePart[] Parts);
+internal record PackageMeter(PackageStep Step, long Done, long Total, bool CountItems = false,
+    bool Finished = false, bool Skipped = false);
+internal record PackageManifest(string ArchiveRoot, string Destination, string Name, ArchivePart[] Parts,
+    string? FolderName = null)
+{
+    [JsonIgnore]
+    public string RemoteName => FolderName ?? Name;
+}
+
+internal sealed record ArchiveRequest(PackagePlan Plan, string LocalName, string Name, string Parent,
+    IReadOnlyList<ArchiveEntry> Items)
+{
+    public string LocalPath => Path.Combine(Plan.StagingParent, LocalName);
+    public string RemotePath => ArchiveSession.Child(Parent, Name);
+}
 
 internal interface IPackageDestination
 {
@@ -26,17 +42,69 @@ internal static class ArchivePackage
 
     public static string NewName() => $"SURF-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}";
 
-    public static async Task Create(PackagePlan plan, string name, string remoteParent, IPackageDestination target,
-        Action<PackageMeter> report, CancellationToken token, long partLimit = PartLimit)
+    public static bool CanArchive(IReadOnlyList<ArchiveEntry> selection) =>
+        selection.Count > 0 && (selection.All(item => item.IsDirectory) || selection.All(item => !item.IsDirectory));
+
+    public static List<ArchiveRequest> PlanSelection(string source, string remoteParent, IReadOnlyList<ArchiveEntry> selection,
+        string? filesFolderName, CancellationToken token)
     {
+        if (!CanArchive(selection))
+            throw new IOException("Select only files or only folders to archive.");
+
+        var requests = new List<ArchiveRequest>();
+        if (selection[0].IsDirectory)
+        {
+            foreach (var folder in selection)
+                Add(folder.Name, [folder]);
+        }
+        else
+        {
+            Add(filesFolderName ?? "", selection);
+        }
+        return requests;
+
+        void Add(string name, IReadOnlyList<ArchiveEntry> items)
+        {
+            ValidateFolderName(name);
+            requests.Add(new(PackagePlan.Create(source, items, token), NewName(), name, remoteParent, items));
+        }
+    }
+
+    public static string VolumeName(string archiveName, int number)
+    {
+        var stem = new StringBuilder();
+        int bytes = 0;
+        foreach (var rune in archiveName.TrimStart('.').EnumerateRunes())
+        {
+            bytes += rune.Utf8SequenceLength;
+            if (bytes > 220)
+                break;
+            stem.Append(rune.ToString());
+        }
+        return $"{stem}-{number:D6}.tar.gz";
+    }
+
+    public static void ValidateFolderName(string name)
+    {
+        ArchiveSession.Child("", name);
+        if (Encoding.UTF8.GetByteCount(name) > 255 || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+            || name.EndsWith(' ') || name.EndsWith('.'))
+            throw new IOException("The source folder name cannot be used on SURF. Shorten or rename it before archiving.");
+    }
+
+    public static async Task Create(PackagePlan plan, string name, string archiveName, string remoteParent,
+        IPackageDestination target, bool removeOriginals, Action<PackageMeter> report,
+        CancellationToken token, long partLimit = PartLimit)
+    {
+        ValidateFolderName(archiveName);
         string folder = Path.Combine(plan.StagingParent, name);
-        if (Path.Exists(folder) || partLimit <= 0)
+        if (Path.Exists(folder) || partLimit < 4096 || partLimit > PartLimit)
             throw new IOException("The local package folder already exists or the volume size is invalid.");
         Directory.CreateDirectory(folder);
         using (var jobLock = Lock(folder))
         {
             var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
-            await target.Prepare(remoteParent, name, resume: false, token);
+            await target.Prepare(remoteParent, archiveName, resume: false, token);
             var channel = Channel.CreateUnbounded<ArchivePart>(new UnboundedChannelOptions { SingleWriter = true, SingleReader = true });
             using var uploading = CancellationTokenSource.CreateLinkedTokenSource(token);
             long exactTotal = 0;
@@ -44,16 +112,25 @@ internal static class ArchivePackage
             ArchivePart[] parts;
             try
             {
-                parts = WriteTar(folder, plan, hashes, partLimit, report, token, part => channel.Writer.TryWrite(part));
-                Interlocked.Exchange(ref exactTotal, parts.Sum(part => part.Size));
-                channel.Writer.TryComplete();
-                using (var frozen = FreezeParts(folder, parts))
+                var volumes = WriteTar(folder, archiveName, plan, hashes, partLimit, report, token,
+                    part => channel.Writer.TryWrite(part));
+                using (var frozen = FreezeParts(folder, volumes))
                 {
-                    VerifyTar(folder, plan, parts, hashes, report, token);
-                    SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts));
+                    VerifyTar(folder, plan, volumes, hashes, report, token);
+                    var contents = PackageContents.Write(folder, archiveName, plan, volumes, report, token);
+                    using var frozenContents = FreezeParts(folder, contents);
+                    parts = [.. volumes, .. contents];
+                    SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName));
+                    Interlocked.Exchange(ref exactTotal, parts.Sum(part => part.Size));
+                    foreach (var item in contents)
+                        channel.Writer.TryWrite(item);
+                    channel.Writer.TryComplete();
                     // A failed upload leaves the originals as well as the verified local package.
                     await upload;
-                    RemoveOriginals(plan, hashes, report, token);
+                    if (removeOriginals)
+                        RemoveOriginals(plan, hashes, report, token);
+                    else
+                        report(new(PackageStep.RemoveOriginals, 0, 0, Finished: true, Skipped: true));
                     await VerifyRemote(parts, target, report, token);
                 }
             }
@@ -109,7 +186,7 @@ internal static class ArchivePackage
                     amount => report(new(PackageStep.Verify, read += amount, total)), token);
                 Drain(reader);
                 report(new(PackageStep.Verify, total, total, Finished: true));
-                await target.Prepare(manifest.Destination, manifest.Name, resume: true, token);
+                await target.Prepare(manifest.Destination, manifest.RemoteName, resume: true, token);
                 await Publish(folder, manifest, target, report, token);
             }
             RemoveLocalParts(folder, manifest.Parts, report, token);
@@ -118,13 +195,13 @@ internal static class ArchivePackage
         FinishFolder(folder);
     }
 
-    private static ArchivePart[] WriteTar(string folder, PackagePlan plan, Dictionary<string, string> hashes,
+    private static ArchivePart[] WriteTar(string folder, string archiveName, PackagePlan plan, Dictionary<string, string> hashes,
         long partLimit, Action<PackageMeter> report, CancellationToken token, Action<ArchivePart> sealedVolume)
     {
         // Count directories and empty files as one unit so these also move the meter.
         long total = plan.Entries.Sum(item => Math.Max(1, item.Size)), done = 0;
         report(new(PackageStep.Archive, 0, total));
-        using var volumes = new VolumeWriter(folder, partLimit, sealedVolume);
+        using var volumes = new VolumeWriter(folder, archiveName, partLimit, sealedVolume);
         using (var tar = new TarWriter(volumes, TarEntryFormat.Pax, leaveOpen: true))
         {
             foreach (var item in plan.Entries)
@@ -171,7 +248,8 @@ internal static class ArchivePackage
         long total = parts.Sum(part => part.Size), done = 0;
         report(new(PackageStep.Verify, 0, total));
         using var volumes = new VolumeReader(folder, parts, count => report(new(PackageStep.Verify, done += count, total)), token);
-        using var reader = new TarReader(volumes, leaveOpen: true);
+        using var gzip = new GZipStream(volumes, CompressionMode.Decompress, leaveOpen: true);
+        using var reader = new TarReader(gzip, leaveOpen: true);
         var buffer = new byte[1 << 20];
         foreach (var expected in plan.Entries)
         {
@@ -191,7 +269,8 @@ internal static class ArchivePackage
         }
         if (reader.GetNextEntry(copyData: false) is not null)
             throw new IOException("The TAR archive contains unexpected entries.");
-        Drain(volumes); // Checks SHA-256 for the complete bytes of every volume, including TAR padding.
+        Drain(gzip);
+        Drain(volumes); // Verify complete compressed volumes, including the final gzip footer.
         report(new(PackageStep.Verify, total, total, Finished: true));
     }
 
@@ -309,13 +388,24 @@ internal static class ArchivePackage
         var manifest = JsonSerializer.Deserialize<PackageManifest>(File.ReadAllText(Path.Combine(folder, ManifestName)))
             ?? throw new IOException("The recovery manifest could not be opened.");
         if (!string.Equals(Path.GetFileName(Path.TrimEndingDirectorySeparator(folder)), manifest.Name, StringComparison.OrdinalIgnoreCase)
-            || !manifest.Name.StartsWith("SURF-", StringComparison.Ordinal) || manifest.Parts.Length == 0)
+            || !manifest.Name.StartsWith("SURF-", StringComparison.Ordinal) || manifest.Parts is not { Length: > 0 })
             throw new IOException("This folder is not a verified SURF package.");
+        int volumeCount = manifest.Parts.Length;
+        if (manifest.FolderName is not null)
+        {
+            ValidateFolderName(manifest.FolderName);
+            volumeCount -= 2;
+            if (volumeCount < 1)
+                throw new IOException("The recovery manifest is missing archive volumes or contents files.");
+        }
         for (int i = 0; i < manifest.Parts.Length; i++)
         {
             var part = manifest.Parts[i];
-            string expected = $"data.tar.part-{i + 1:D6}";
-            if (part.Name != expected || part.Size <= 0 || part.Size > PartLimit || part.Sha256.Length != 64
+            string expected = manifest.FolderName is null ? $"data.tar.part-{i + 1:D6}"
+                : i < volumeCount ? VolumeName(manifest.FolderName, i + 1)
+                : i == volumeCount ? PackageContents.TextName : PackageContents.HtmlName;
+            if (part is null || part.Name != expected || part.Size <= 0 ||
+                (i < volumeCount && part.Size > PartLimit) || part.Sha256 is not { Length: 64 }
                 || !part.Sha256.All(Uri.IsHexDigit))
                 throw new IOException("The recovery manifest contains an invalid archive part.");
         }

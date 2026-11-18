@@ -9,7 +9,7 @@ internal sealed class MainWindow : Form
     private readonly Button upload = DarkTheme.Button("Upload to SURF  →", primary: true);
     private readonly Button download = DarkTheme.Button("← Download", primary: true);
     private readonly Button restore = DarkTheme.Button("Restore from tape");
-    private readonly Button package = DarkTheme.Button("Archive to SURF…");
+    private readonly Button package = DarkTheme.Button("Archive to SURF…", primary: true);
     private readonly Button resume = DarkTheme.Button("Resume archive upload…");
     private readonly Button removeWindows = DarkTheme.Button("Remove…");
     private readonly Button removeSurf = DarkTheme.Button("Remove…");
@@ -46,7 +46,7 @@ internal sealed class MainWindow : Form
         windows.SelectionChanged += UpdateControls;
         surf.SelectionChanged += UpdateControls;
         signIn.Click += async (_, _) => await Run(ToggleLogin);
-        upload.Click += async (_, _) => await Run(token => Copy(toSurf: true, token), transfer: true);
+        upload.Click += async (_, _) => await UploadDirect();
         download.Click += async (_, _) => await Run(token => Copy(toSurf: false, token), transfer: true);
         restore.Click += (_, _) => StartRestores();
         package.Click += async (_, _) => await ArchiveSelected();
@@ -103,7 +103,7 @@ internal sealed class MainWindow : Form
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(13, 5, 13, 1) };
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
-        actions.Controls.Add(DarkTheme.Row(upload, package, removeWindows), 0, 0);
+        actions.Controls.Add(DarkTheme.Row(package, upload, removeWindows), 0, 0);
         actions.Controls.Add(DarkTheme.Row(download, restore, newFolder, removeSurf), 1, 0);
         layout.Controls.Add(actions, 0, 2);
 
@@ -286,6 +286,19 @@ internal sealed class MainWindow : Form
         SetFeedback("");
     }
 
+    private async Task UploadDirect()
+    {
+        var selection = windows.SelectedItems;
+        if (!LocalFiles.CanUploadDirectly(selection))
+            return;
+        if (MessageBox.Show(this,
+            "Archive to SURF is recommended. It bundles and verifies your data and creates a contents list.\n\n" +
+            $"Direct upload sends {selection.Count:N0} file(s) separately without creating an archive. Continue with direct upload?",
+            "Direct upload to SURF", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2) == DialogResult.OK)
+            await Run(token => Copy(toSurf: true, token), transfer: true);
+    }
+
     private async Task Copy(bool toSurf, CancellationToken token)
     {
         if (!toSurf)
@@ -317,7 +330,7 @@ internal sealed class MainWindow : Form
             {
                 var progress = new Callback<TransferProgress>(job.Report);
                 if (toSurf)
-                    await Task.Run(() => archive!.Upload(source, target.PathShown, progress, token));
+                    await Task.Run(() => archive!.Upload(source, target.PathShown, progress, token, LocalFiles.MinimumDirectUpload));
                 else
                 {
                     job.SetPhase(TransferState.CheckingStatus);
@@ -429,25 +442,40 @@ internal sealed class MainWindow : Form
         var selection = windows.SelectedItems;
         string source = windows.PathShown;
         string destination = surf.PathShown;
+        if (!ArchivePackage.CanArchive(selection))
+            return;
+        string? filesFolderName = null;
+        if (!selection[0].IsDirectory)
+        {
+            filesFolderName = PackageDialog.AskFolderName(this);
+            if (filesFolderName is null)
+                return;
+        }
 
         await Run(async token =>
         {
             SetFeedback("Scanning selected data and checking staging space…");
-            var plan = await Task.Run(() => PackagePlan.Create(source, selection, token));
-            string name = ArchivePackage.NewName();
-            string recovery = Path.Combine(plan.StagingParent, name);
-            string remote = ArchiveSession.Child(destination, name);
-            if (!PackageDialog.Confirm(this, plan, selection, recovery, remote))
+            var requests = await Task.Run(() => ArchivePackage.PlanSelection(source, destination, selection, filesFolderName, token));
+            await Task.Run(() => archive!.CheckArchiveDestinations(requests, token));
+            bool? removeOriginals = PackageDialog.Confirm(this, requests);
+            if (removeOriginals is null)
             {
                 SetFeedback("");
                 return;
             }
 
-            await RunPackage(name, recovery, remote, (target, progress) =>
-                ArchivePackage.Create(plan, name, destination, target, progress, token), token);
+            foreach (var request in requests)
+            {
+                token.ThrowIfCancellationRequested();
+                await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
+                    ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
+                        target, removeOriginals.Value, progress, token), token);
+            }
             await NavigateLocal(source, null);
             await NavigateRemote(destination, null);
-            SetFeedback("Archive uploaded and verified. Local archive parts removed.");
+            SetFeedback(removeOriginals.Value
+                ? "Archives uploaded and verified. Originals and local archive parts removed."
+                : "Archives uploaded and verified. Originals kept.");
         }, transfer: true);
     }
 
@@ -464,7 +492,7 @@ internal sealed class MainWindow : Form
         await Run(async token =>
         {
             var manifest = await Task.Run(() => ArchivePackage.ReadManifest(folder));
-            string remote = ArchiveSession.Child(manifest.Destination, manifest.Name);
+            string remote = ArchiveSession.Child(manifest.Destination, manifest.RemoteName);
             if (MessageBox.Show(this,
                 $"Resume uploading to:\n{remote}\n\nLocal TAR parts will be removed after every SURF checksum matches.",
                 "Resume archive upload", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
@@ -473,7 +501,7 @@ internal sealed class MainWindow : Form
                 SetFeedback("");
                 return;
             }
-            await RunPackage(manifest.Name, folder, remote, (target, progress) =>
+            await RunPackage(manifest.RemoteName, folder, remote, (target, progress) =>
                 ArchivePackage.Resume(folder, target, progress, token), token);
             if (surf.HasFolder)
                 await NavigateRemote(surf.PathShown, null);
@@ -523,7 +551,7 @@ internal sealed class MainWindow : Form
                 job.Report(new(name, meter.Done, meter.Total));
                 if (meter.Finished)
                 {
-                    Invoke(() => transfers.Finish(job, TransferState.Completed));
+                    Invoke(() => transfers.Finish(job, meter.Skipped ? TransferState.Skipped : TransferState.Completed));
                     stages.Remove(meter.Step);
                 }
             }
@@ -532,8 +560,9 @@ internal sealed class MainWindow : Form
 
     private static string StepCaption(PackageStep step) => step switch
     {
-        PackageStep.Archive => "Pack TAR",
+        PackageStep.Archive => "Compress TAR",
         PackageStep.Verify => "Verify local TAR",
+        PackageStep.Index => "Write contents",
         PackageStep.RemoveOriginals => "Remove originals",
         PackageStep.Upload => "Upload parts",
         PackageStep.RemoteSha => "SURF SHA-256",
@@ -681,13 +710,14 @@ internal sealed class MainWindow : Form
         connection.ForeColor = online ? DarkTheme.Mint : DarkTheme.Muted;
         windows.SetAvailable(idle, windows.HasFolder);
         surf.SetAvailable(idle, online && surf.HasFolder);
-        upload.Enabled = idle && surf.HasFolder && windows.SelectedFiles.Count > 0;
+        var localSelection = windows.SelectedItems;
+        upload.Enabled = idle && online && surf.HasFolder && LocalFiles.CanUploadDirectly(localSelection);
         var selected = surf.SelectedFiles;
         download.Enabled = idle && online && windows.HasFolder && selected.Count > 0 &&
             selected.All(item => ArchiveStatus.IsOnDisk(item.Status));
         restore.Enabled = idle && online && selected.Any(item => ArchiveStatus.CanRestore(item.Status)
             && !restores.ContainsKey(ArchiveSession.Child(surf.PathShown, item.Name)));
-        package.Enabled = idle && online && surf.HasFolder && windows.SelectedItems.Count > 0;
+        package.Enabled = idle && online && surf.HasFolder && ArchivePackage.CanArchive(localSelection);
         resume.Enabled = idle && online;
         removeWindows.Enabled = idle && windows.SelectedItems.Count > 0;
         removeSurf.Enabled = idle && online && surf.SelectedItems.Count > 0;
