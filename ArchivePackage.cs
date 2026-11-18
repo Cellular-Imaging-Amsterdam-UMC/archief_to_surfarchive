@@ -11,7 +11,8 @@ namespace SurfArchive;
 internal enum PackageStep { Archive = 1, Verify, RemoveOriginals, Upload, RemoteSha, RemoveParts, Index }
 
 internal record PackageMeter(PackageStep Step, long Done, long Total, bool CountItems = false,
-    bool Finished = false, bool Skipped = false, bool TotalKnown = true);
+    bool Finished = false, bool Skipped = false, bool TotalKnown = true,
+    TransferState? Phase = null, string? Message = null, bool TotalOnly = false);
 internal record PackageManifest(string ArchiveRoot, string Destination, string Name, ArchivePart[] Parts,
     string? FolderName = null, bool IncludesRetention = false, bool SplitZip = false)
 {
@@ -29,10 +30,12 @@ internal sealed record ArchiveRequest(PackagePlan Plan, string LocalName, string
 internal interface IPackageDestination
 {
     string Root { get; }
-    Task Prepare(string parent, string name, bool resume, CancellationToken token);
+    Task Prepare(string parent, string name, bool resume, Action<string> onRetry, CancellationToken token);
     bool HasPart(string name);
-    Task Upload(string localPath, IProgress<TransferProgress> progress, CancellationToken token);
-    Task<string> Hash(string name, CancellationToken token);
+    Task Upload(string localPath, ArchivePart part, IProgress<TransferProgress> progress, Action<string> onRetry,
+        CancellationToken token);
+    Task StageForVerification(ArchivePart[] parts, Action<RestoreUpdate> report, Action<string> onRetry, CancellationToken token);
+    Task<string> Hash(string name, Action<string> onRetry, CancellationToken token);
 }
 
 internal static class ArchivePackage
@@ -105,7 +108,6 @@ internal static class ArchivePackage
         using (var jobLock = Lock(folder))
         {
             var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
-            await target.Prepare(remoteParent, archiveName, resume: false, token);
             var channel = Channel.CreateUnbounded<ArchivePart>(new UnboundedChannelOptions { SingleWriter = true, SingleReader = true });
             using var uploading = CancellationTokenSource.CreateLinkedTokenSource(token);
             using var originals = options.RemoveOriginals ? new VerifiedFiles() : null;
@@ -123,13 +125,15 @@ internal static class ArchivePackage
                 parts = [.. volumes, .. contents];
                 SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName,
                     IncludesRetention: true, SplitZip: true));
-                Interlocked.Exchange(ref exactTotal, parts.Sum(part => part.Size));
+                long totalSize = parts.Sum(part => part.Size);
+                Interlocked.Exchange(ref exactTotal, totalSize);
+                report(new(PackageStep.Upload, 0, totalSize, TotalOnly: true));
                 foreach (var item in contents)
                     channel.Writer.TryWrite(item);
                 channel.Writer.TryComplete();
                 await upload;
                 // Keep the originals until all remote parts and metadata files match.
-                await VerifyRemote(parts, target, report, token);
+                await VerifyRemote(parts, target, ReportStage, token);
                 if (originals is not null)
                     RemoveOriginals(plan, hashes, originals, report, token);
                 else
@@ -149,22 +153,46 @@ internal static class ArchivePackage
             async Task UploadWhileBuilding()
             {
                 long done = 0;
-                await foreach (var part in channel.Reader.ReadAllAsync(uploading.Token))
+                try
                 {
-                    long offset = done;
-                    await target.Upload(Path.Combine(folder, part.Name), new Callback<TransferProgress>(progress =>
-                        ReportUpload(offset + progress.Bytes)),
-                        uploading.Token);
-                    done += part.Size;
-                    ReportUpload(done);
+                    await target.Prepare(remoteParent, archiveName, resume: false,
+                        message => ReportUpload(0, TransferState.Retrying, message), uploading.Token);
+                    while (true)
+                    {
+                        if (!channel.Reader.TryRead(out var part))
+                        {
+                            if (!channel.Reader.Completion.IsCompleted)
+                                ReportUpload(done, TransferState.WaitingForParts);
+                            if (!await channel.Reader.WaitToReadAsync(uploading.Token))
+                                break;
+                            continue;
+                        }
+
+                        await UploadPart(folder, part, target, done, ReportUpload, uploading.Token);
+                        done += part.Size;
+                        ReportUpload(done);
+                    }
+                    report(new(PackageStep.Upload, done, done, Finished: true));
                 }
-                report(new(PackageStep.Upload, done, done, Finished: true));
+                catch (Exception error) when (!uploading.IsCancellationRequested)
+                {
+                    ReportUpload(done, TransferState.UploadStopped, error.Message);
+                    throw;
+                }
             }
 
-            void ReportUpload(long done)
+            void ReportUpload(long done, TransferState? phase = null, string? message = null)
             {
                 long final = Interlocked.Read(ref exactTotal);
-                report(new(PackageStep.Upload, done, final, TotalKnown: final > 0));
+                ReportStage(new(PackageStep.Upload, done, final, TotalKnown: final > 0, Phase: phase, Message: message));
+            }
+
+            void ReportStage(PackageMeter meter)
+            {
+                if (meter.Phase is TransferState.Retrying or TransferState.UploadStopped
+                    or TransferState.RequestingTape or TransferState.TapeQueue or TransferState.RestoringTape)
+                    originals?.Dispose();
+                report(meter);
             }
         }
         FinishFolder(folder);
@@ -185,7 +213,8 @@ internal static class ArchivePackage
             report(new(PackageStep.Verify, 0, total));
             VerifyParts(available, frozen, amount => report(new(PackageStep.Verify, read += amount, total)), token);
             report(new(PackageStep.Verify, total, total, Finished: true));
-            await target.Prepare(manifest.Destination, manifest.RemoteName, resume: true, token);
+            await target.Prepare(manifest.Destination, manifest.RemoteName, resume: true, message =>
+                report(new(PackageStep.Upload, 0, 0, TotalKnown: false, Phase: TransferState.Retrying, Message: message)), token);
             await Publish(folder, manifest, target, report, token);
             RemoveLocalParts(folder, manifest.Parts, frozen, report, token);
             File.Delete(Path.Combine(folder, ManifestName));
@@ -346,14 +375,32 @@ internal static class ArchivePackage
                 string path = Path.Combine(folder, part.Name);
                 if (!File.Exists(path))
                     throw new IOException($"Archive part {part.Name} is missing locally and on SURF.");
-                long offset = done;
-                await target.Upload(path, new Callback<TransferProgress>(progress =>
-                    report(new(PackageStep.Upload, offset + progress.Bytes, total))), token);
-                report(new(PackageStep.Upload, done += part.Size, total));
+                try
+                {
+                    await UploadPart(folder, part, target, done, ReportUpload, token);
+                }
+                catch (Exception error) when (!token.IsCancellationRequested)
+                {
+                    ReportUpload(done, TransferState.UploadStopped, error.Message);
+                    throw;
+                }
+                ReportUpload(done += part.Size);
             }
             report(new(PackageStep.Upload, total, total, Finished: true));
         }
         await VerifyRemote(manifest.Parts, target, report, token);
+
+        void ReportUpload(long bytes, TransferState? phase = null, string? message = null) =>
+            report(new(PackageStep.Upload, bytes, total, Phase: phase, Message: message));
+    }
+
+    private static async Task UploadPart(string folder, ArchivePart part, IPackageDestination target, long offset,
+        Action<long, TransferState?, string?> report, CancellationToken token)
+    {
+        report(offset, TransferState.Transferring, null);
+        await target.Upload(Path.Combine(folder, part.Name), part, new Callback<TransferProgress>(progress =>
+            report(offset + progress.Bytes, null, null)),
+            message => report(offset, TransferState.Retrying, message), token);
     }
 
     private static async Task VerifyRemote(ArchivePart[] parts, IPackageDestination target,
@@ -361,15 +408,24 @@ internal static class ArchivePackage
     {
         long total = parts.Sum(part => part.Size), done = 0;
         report(new(PackageStep.RemoteSha, 0, total));
+        await target.StageForVerification(parts, update =>
+        {
+            if (update.Phase is TransferState.RequestingTape or TransferState.TapeQueue or TransferState.RestoringTape)
+                report(new(PackageStep.RemoteSha, 0, total, Phase: update.Phase, Message: update.Message));
+        }, OnRetry, token);
+        report(new(PackageStep.RemoteSha, 0, total, Phase: TransferState.Transferring));
         foreach (var part in parts)
         {
             token.ThrowIfCancellationRequested();
-            string remote = await target.Hash(part.Name, token);
+            string remote = await target.Hash(part.Name, OnRetry, token);
             if (!remote.Equals(part.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new IOException($"SURF SHA-256 does not match {part.Name}. The local archive was kept.");
             report(new(PackageStep.RemoteSha, done += part.Size, total));
         }
         report(new(PackageStep.RemoteSha, total, total, Finished: true));
+
+        void OnRetry(string message) =>
+            report(new(PackageStep.RemoteSha, done, total, Phase: TransferState.Retrying, Message: message));
     }
 
     private static void RemoveLocalParts(string folder, ArchivePart[] parts, VerifiedFiles frozen,
@@ -473,7 +529,18 @@ internal static class ArchivePackage
     private sealed class VerifiedFiles : IDisposable
     {
         private readonly Dictionary<string, SafeFileHandle> handles = new(StringComparer.Ordinal);
-        public void Hold(string name, SafeFileHandle handle) => handles.Add(name, handle);
+        private bool disposed;
+
+        public void Hold(string name, SafeFileHandle handle)
+        {
+            lock (handles)
+            {
+                if (disposed)
+                    handle.Dispose();
+                else
+                    handles.Add(name, handle);
+            }
+        }
         public SafeFileHandle Get(string name) => handles[name];
         public SafeFileHandle? Take(string name) => handles.Remove(name, out var handle) ? handle : null;
 
@@ -486,8 +553,13 @@ internal static class ArchivePackage
 
         public void Dispose()
         {
-            foreach (var handle in handles.Values)
-                handle.Dispose();
+            lock (handles)
+            {
+                disposed = true;
+                foreach (var handle in handles.Values)
+                    handle.Dispose();
+                handles.Clear();
+            }
         }
     }
 }

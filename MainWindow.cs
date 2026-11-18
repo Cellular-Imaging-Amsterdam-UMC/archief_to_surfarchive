@@ -859,6 +859,8 @@ internal sealed class MainWindow : Form
             string message = Directory.Exists(recovery) ? $"Local package folder kept: {recovery}" : "No package folder was created.";
             foreach (var stage in stages.Values)
             {
+                if (!cancelled && !stage.Notes.Any(note => note.EndsWith(error.Message, StringComparison.Ordinal)))
+                    transfers.Log(error.Message, stage);
                 transfers.Log(message, stage);
                 transfers.Finish(stage, cancelled ? TransferState.Cancelled : TransferState.Failed);
             }
@@ -884,7 +886,12 @@ internal sealed class MainWindow : Form
                         transfers.Log(detail, job);
                     });
                 }
-                job.Report(new(name, meter.Done, meter.Total, meter.TotalKnown));
+                if (meter.TotalOnly)
+                    job.SetTotal(meter.Total);
+                else
+                    job.Report(new(name, meter.Done, meter.Total, meter.TotalKnown), meter.Phase);
+                if (meter.Message is { } updateMessage)
+                    Invoke(() => transfers.Log(updateMessage, job));
                 if (meter.Finished)
                 {
                     Invoke(() => transfers.Finish(job, meter.Skipped ? TransferState.Skipped : TransferState.Completed));
@@ -900,7 +907,7 @@ internal sealed class MainWindow : Form
         PackageStep.Verify => ("Check local archive", "Checking", "Archive parts and decoded file contents read for verification.", true),
         PackageStep.Index => ("Write archive metadata", "Writing", "Items indexed for the contents files. Also writes retention.json.", false),
         PackageStep.RemoveOriginals => ("Remove originals", "Removing", "Originals are removed after all SURF SHA-256 checks pass.", false),
-        PackageStep.Upload => ("Upload to SURF", "Uploading", "Measures package bytes sent to SURF. The final size includes compressed parts and metadata.", true),
+        PackageStep.Upload => ("Upload to SURF", "Uploading", "Completed parts upload during packing. The final size includes compressed parts and metadata.", true),
         PackageStep.RemoteSha => ("Check SURF checksums", "Checking", "Package bytes covered by matching SHA-256 checksums. Updates after each file.", false),
         _ => ("Clean up local package", "Cleaning up", "Local package files checked for cleanup.", false)
     };

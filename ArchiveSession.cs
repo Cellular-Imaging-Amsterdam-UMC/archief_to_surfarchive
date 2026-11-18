@@ -313,7 +313,7 @@ internal sealed class ArchiveSession : IDisposable
             progress.Report(new(name, checked((long)value.TotalBytesUploaded), size)));
         progress.Report(new(name, 0, size));
         await client.UploadFileAsync(input, destination, canOverride: false, report, token);
-        if (client.GetAttributes(destination).Size != size)
+        if ((await client.GetAttributesAsync(destination, token)).Size != size)
             throw new IOException("The file size on SURF differs from the source.");
         progress.Report(new(name, size, size));
     }
@@ -575,42 +575,187 @@ internal sealed class ArchiveSession : IDisposable
 
     internal sealed class PackageDestination(ArchiveSession session) : IPackageDestination, IDisposable
     {
+        private SftpClient? uploadClient;
         private SshClient? shell;
+        private readonly HashSet<string> existing = new(StringComparer.Ordinal);
+        private readonly PackageRetry retry = new(TimeProvider.System);
         private string directory = "";
         public string Root => session.Root;
 
-        public async Task Prepare(string parent, string name, bool resume, CancellationToken token)
+        public async Task Prepare(string parent, string name, bool resume, Action<string> onRetry, CancellationToken token)
         {
             if ((parent != Root && !parent.StartsWith(Root + "/", StringComparison.Ordinal)) ||
                 parent.Split('/').Any(part => part is "." or ".." || part.Any(char.IsControl)))
                 throw new IOException("The package destination is outside this SURF archive.");
 
             directory = Child(parent, name);
-            shell = await session.OpenShellAsync(token);
-            await RunAsync(shell,
-                $"command -v sha256sum >/dev/null && cd -- {Quote(Root)} && archive_root=$(pwd -P) && cd -- {Quote(parent)} && " +
-                "case \"$(pwd -P)/\" in \"$archive_root/\"*) ;; *) exit 4 ;; esac", token);
-            session.Reconnect();
-            token.ThrowIfCancellationRequested();
-            if (!resume || !session.sftp.Exists(directory))
-                session.sftp.CreateDirectory(directory);
-            await RunAsync(shell, "test -d " + Quote(directory) + " && test ! -L " + Quote(directory), token);
+            bool prepared = false;
+            await retry.Run($"Preparing SURF folder {name}", async (_, ct) =>
+            {
+                using var validation = await session.OpenShellAsync(ct);
+                await RunAsync(validation,
+                    $"command -v sha256sum >/dev/null && cd -- {Quote(Root)} && archive_root=$(pwd -P) && cd -- {Quote(parent)} && " +
+                    "case \"$(pwd -P)/\" in \"$archive_root/\"*) ;; *) exit 4 ;; esac", ct);
+                var client = await ConnectUploadClient(ct);
+                if (!prepared)
+                {
+                    bool exists = await client.ExistsAsync(directory, ct);
+                    if (!resume && exists)
+                        throw new IOException($"The SURF destination already exists: {directory}.");
+                    if (!exists)
+                        await client.CreateDirectoryAsync(directory, ct);
+                    prepared = true;
+                }
+                await RunAsync(validation, "test -d " + Quote(directory) + " && test ! -L " + Quote(directory), ct);
+                if (resume)
+                {
+                    existing.Clear();
+                    await foreach (var entry in client.ListDirectoryAsync(directory, ct))
+                        existing.Add(entry.Name);
+                }
+                return true;
+            }, ResetUploadClient, onRetry, token);
         }
 
-        public bool HasPart(string name) => session.sftp.Exists(Child(directory, name));
+        public bool HasPart(string name) => existing.Contains(name);
 
-        public Task Upload(string localPath, IProgress<TransferProgress> progress, CancellationToken token) =>
-            session.Upload(localPath, directory, progress, token);
+        public async Task Upload(string localPath, ArchivePart part, IProgress<TransferProgress> progress,
+            Action<string> onRetry, CancellationToken token)
+        {
+            string destination = Child(directory, part.Name);
+            string staging = Child(directory, ".surfarchive-upload-" + Guid.NewGuid().ToString("N"));
+            bool mayHaveStaging = false;
+            bool publishAttempted = false;
+            try
+            {
+                await retry.Run($"Upload of {part.Name}", async (attempt, ct) =>
+                {
+                    var client = await ConnectUploadClient(ct);
+                    if (await client.ExistsAsync(destination, ct))
+                    {
+                        if (!publishAttempted)
+                            throw new IOException($"A file or folder named '{part.Name}' already exists on SURF.");
 
-        public async Task<string> Hash(string name, CancellationToken token)
+                        // A rename may have succeeded just before the acknowledgement was lost.
+                        string actual = await HashOnServer(part.Name, ct);
+                        if (!part.Sha256.Equals(actual, StringComparison.OrdinalIgnoreCase))
+                            throw new IOException($"The existing SURF file '{part.Name}' has a different SHA-256 checksum.");
+                        if (mayHaveStaging)
+                            await RemoveStaging(client, staging, ct);
+                        progress.Report(new(part.Name, part.Size, part.Size));
+                        return true;
+                    }
+
+                    if (attempt > 1 && mayHaveStaging)
+                        await RemoveStaging(client, staging, ct);
+                    using var input = OpenSource(localPath);
+                    if (input.Length != part.Size)
+                        throw new IOException($"The local size of {part.Name} changed before it was uploaded.");
+                    mayHaveStaging = true;
+                    await CopyUp(client, input, staging, part.Name, progress, ct);
+                    ct.ThrowIfCancellationRequested();
+                    publishAttempted = true;
+                    await client.RenameFileAsync(staging, destination, ct);
+                    return true;
+                }, () =>
+                {
+                    ResetUploadClient();
+                    ResetShell();
+                }, onRetry, token);
+            }
+            catch (Exception error)
+            {
+                ResetUploadClient();
+                if (mayHaveStaging)
+                {
+                    try
+                    {
+                        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                        await RemoveStaging(await ConnectUploadClient(cleanup.Token), staging, cleanup.Token);
+                    }
+                    catch (Exception cleanupError)
+                    {
+                        if (!token.IsCancellationRequested)
+                            throw new IOException($"{error.Message} Could not remove temporary SURF file {staging}: {cleanupError.Message}", error);
+                    }
+                }
+                token.ThrowIfCancellationRequested();
+                throw;
+            }
+        }
+
+        public Task<string> Hash(string name, Action<string> onRetry, CancellationToken token) =>
+            retry.Run($"SHA-256 check of {name}", (_, ct) => HashOnServer(name, ct),
+                ResetShell, onRetry, token);
+
+        public Task StageForVerification(ArchivePart[] parts, Action<RestoreUpdate> report, Action<string> onRetry,
+            CancellationToken token)
+        {
+            string[] paths = parts.Select(part => Child(directory, part.Name)).ToArray();
+            return TapeRestore.WaitForFolder(paths,
+                ct => retry.Run("Checking archive parts before SHA-256", async (_, attemptToken) =>
+                    await ReadPathStatuses(await ConnectShell(attemptToken), paths, attemptToken), ResetShell, onRetry, ct),
+                async (offline, ct) =>
+                {
+                    foreach (string command in PathCommands("daget -a", offline, ct))
+                        await retry.Run("Requesting archive parts from tape", async (_, attemptToken) =>
+                            await RunAsync(await ConnectShell(attemptToken), command, attemptToken, timeoutSeconds: 90),
+                            ResetShell, onRetry, ct);
+                }, report, ct => Task.Delay(RestorePolling.ManualInterval, ct), token);
+        }
+
+        private async Task<string> HashOnServer(string name, CancellationToken token)
         {
             string path = Quote(Child(directory, name));
-            string value = await RunAsync(shell!, $"test -f {path} && test ! -L {path} && sha256sum < {path}",
+            string value = await RunAsync(await ConnectShell(token), $"test -f {path} && test ! -L {path} && sha256sum < {path}",
                 token, timeoutSeconds: 120);
             return value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
         }
 
-        public void Dispose() => shell?.Dispose();
+        private async Task<SshClient> ConnectShell(CancellationToken token)
+        {
+            if (shell is not { IsConnected: true })
+            {
+                ResetShell();
+                shell = await session.OpenShellAsync(token);
+            }
+            return shell;
+        }
+
+        private static async Task RemoveStaging(SftpClient client, string path, CancellationToken token)
+        {
+            try { await client.DeleteFileAsync(path, token); }
+            catch (SftpPathNotFoundException) { }
+        }
+
+        private async Task<SftpClient> ConnectUploadClient(CancellationToken token)
+        {
+            if (uploadClient is { IsConnected: true })
+                return uploadClient;
+            ResetUploadClient();
+            uploadClient = session.CreateSftpClient();
+            uploadClient.OperationTimeout = TimeSpan.FromMinutes(2);
+            await uploadClient.ConnectAsync(token);
+            return uploadClient;
+        }
+
+        private void ResetUploadClient()
+        {
+            uploadClient?.Dispose();
+            uploadClient = null;
+        }
+
+        private void ResetShell()
+        {
+            shell?.Dispose();
+            shell = null;
+        }
+
+        public void Dispose()
+        {
+            ResetUploadClient();
+            ResetShell();
+        }
     }
 }
 

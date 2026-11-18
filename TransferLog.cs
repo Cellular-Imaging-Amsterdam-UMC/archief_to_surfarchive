@@ -5,7 +5,7 @@ namespace SurfArchive;
 internal enum TransferState
 {
     Preparing, CheckingStatus, RequestingTape, TapeQueue, RestoringTape, Transferring, Verifying,
-    Ready, Completed, Cancelled, Failed, Skipped
+    Ready, Completed, Cancelled, Failed, Skipped, WaitingForParts, Retrying, UploadStopped
 }
 
 internal sealed class TransferJob(string name, string direction, string source, string target, long size,
@@ -36,22 +36,45 @@ internal sealed class TransferJob(string name, string direction, string source, 
             state = phase;
     }
 
-    public void Report(TransferProgress update)
+    public void SetTotal(long size)
     {
         lock (sync)
         {
-            if (copyEnd is not null || update.Bytes < copied || state is TransferState.Completed or TransferState.Failed or TransferState.Cancelled)
+            total = size;
+            known = true;
+        }
+    }
+
+    public void Report(TransferProgress update) => Report(update, null);
+
+    public void Report(TransferProgress update, TransferState? phase)
+    {
+        lock (sync)
+        {
+            bool restart = phase is TransferState.Retrying or TransferState.UploadStopped;
+            if ((!restart && (copyEnd is not null || update.Bytes < copied))
+                || state is TransferState.Completed or TransferState.Failed or TransferState.Cancelled)
                 return;
 
             double now = clock.Elapsed.TotalSeconds;
-            total = update.Total;
-            known = update.TotalKnown;
-            if (copyStart is null)
+            if (update.TotalKnown || !known)
             {
-                copyStart = now;
+                total = update.Total;
+                known = update.TotalKnown;
+            }
+            if (restart)
+            {
+                copied = update.Bytes;
+                copyEnd = null;
+            }
+            bool starting = copyStart is null;
+            copyStart ??= now;
+            if (starting || restart || state is TransferState.WaitingForParts or TransferState.Retrying)
+            {
                 lastProgress = now;
                 lastSample = now;
-                samples.Enqueue((now, 0));
+                samples.Clear();
+                samples.Enqueue((now, copied));
                 state = TransferState.Transferring;
             }
             if (update.Bytes > copied)
@@ -66,7 +89,9 @@ internal sealed class TransferJob(string name, string direction, string source, 
                 while (samples.Count > 1 && now - samples.Peek().Time > 5)
                     samples.Dequeue();
             }
-            if (known && copied >= total)
+            if (phase is { } explicitPhase)
+                state = explicitPhase;
+            else if (known && copied >= total)
             {
                 copyEnd = now;
                 state = TransferState.Verifying;
@@ -300,15 +325,18 @@ internal sealed class TransferLog : UserControl
             TransferState.RequestingTape => "Requesting tape",
             TransferState.TapeQueue => "Waiting for tape",
             TransferState.RestoringTape => "Restoring tape",
+            TransferState.WaitingForParts => "Waiting for parts",
+            TransferState.Retrying => "Retry scheduled",
+            TransferState.UploadStopped => "Upload stopped",
             TransferState.Ready => "Ready to download",
             _ => snapshot.State.ToString()
         };
         row.Cells[2].Style.ForeColor = snapshot.State switch
         {
             TransferState.Completed or TransferState.Ready => DarkTheme.Mint,
-            TransferState.Failed => DarkTheme.Error,
+            TransferState.Failed or TransferState.UploadStopped => DarkTheme.Error,
             TransferState.Cancelled or TransferState.RequestingTape or TransferState.TapeQueue
-                or TransferState.RestoringTape => DarkTheme.Amber,
+                or TransferState.RestoringTape or TransferState.Retrying => DarkTheme.Amber,
             _ => DarkTheme.Ink
         };
         row.Cells[3].Value = restoreOnly ? snapshot.WaitingForTape ? "Tape restore" : "—"
