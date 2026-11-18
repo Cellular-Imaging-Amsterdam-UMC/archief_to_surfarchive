@@ -33,9 +33,14 @@ internal sealed class MainWindow : Form
         StartPosition = FormStartPosition.CenterScreen;
         BuildLayout();
 
+        windows.AddLocation(LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive);
+        windows.AddLocation(LocalFiles.BasicFolder, LocalFiles.BasicFolder);
         windows.AddLocation("Archief Active (L:)", LocalFiles.ActiveArchive);
         foreach (string drive in Directory.GetLogicalDrives())
-            windows.AddLocation(drive, drive);
+        {
+            if (!drive.Equals(LocalFiles.ArchiveDrive, StringComparison.OrdinalIgnoreCase))
+                windows.AddLocation(drive, drive);
+        }
         windows.SetHistory(new RecentFolders(null));
         if (archive is not null)
             surf.SetHistory(new RecentFolders(archive.Root));
@@ -132,13 +137,23 @@ internal sealed class MainWindow : Form
 
     private async Task LoadDefaultLocal()
     {
-        try { await NavigateLocal(LocalFiles.ActiveArchive, "Archief Active"); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        foreach (var (path, label) in new[]
         {
-            transfers.Log($"Could not open {LocalFiles.ActiveArchive}. {error.Message}");
-            string path = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            await NavigateLocal(path, "Documents");
+            (LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive),
+            (LocalFiles.ActiveArchive, "Archief Active")
+        })
+        {
+            try
+            {
+                await NavigateLocal(path, label);
+                return;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                transfers.Log($"Could not open {path}. {error.Message}");
+            }
         }
+        await NavigateLocal(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Documents");
     }
 
     private async Task NavigateLocal(string path, string? root)

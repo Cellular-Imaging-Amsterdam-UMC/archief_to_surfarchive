@@ -2,6 +2,8 @@
 
 Windows x64 file manager for SURF Data Archive. Browse Archief or another Windows drive on the left and your personal SURF archive on the right. Each side has a resizable folder tree and a sortable, filterable file list.
 
+The Windows pane starts at `L:\`. The location menu also has shortcuts to `L:\basic` and `L:\Archief\Active`.
+
 1. Open **SurfDataArchiveTransfer.exe** and sign in with a SURF Data Archive account. **Remember username** saves the username locally. Enter the password each time you sign in.
 2. **Archive to SURF** is the usual upload action. **Upload to SURF** is available for direct copies only when every selected item is a file strictly larger than 100 MB. It always asks for confirmation. Use **Recent** in either pane to reopen a visited folder. You can also enter a folder or UNC path in the Windows path field.
 3. For a file on tape, click **Restore from tape**. **Activity** checks SURF every 30 seconds while you are signed in. Once the job reports **Ready to download**, select the file and click **Download**. The download rechecks that the file is on disk (`REG` or `DUL`). Stopping the monitor does not cancel a restore already submitted to SURF. SURF does not publish a fixed restore time or expose a percentage for this workflow.

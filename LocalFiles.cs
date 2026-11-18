@@ -9,6 +9,8 @@ internal static class LocalFiles
     public static bool CanUploadDirectly(IReadOnlyList<ArchiveEntry> selection) =>
         selection.Count > 0 && selection.All(item => !item.IsDirectory && item.Size > MinimumDirectUpload);
 
+    public const string ArchiveDrive = @"L:\";
+    public const string BasicFolder = @"L:\basic";
     public const string ActiveArchive = @"L:\Archief\Active";
 
     private static readonly EnumerationOptions ReadEntries = new()
