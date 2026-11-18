@@ -10,12 +10,13 @@ internal static class PackageContents
     public const string HtmlName = "contents.html";
 
     public static ArchivePart[] Write(string folder, string name, PackagePlan plan, ArchivePart[] volumes,
-        Action<PackageMeter> report, CancellationToken token)
+        RetentionMetadata retention, Action<PackageMeter> report, CancellationToken token)
     {
         long done = 0, total = plan.Entries.Count;
         report(new(PackageStep.Index, done, total, CountItems: true));
         string textPath = Path.Combine(folder, TextName);
         string htmlPath = Path.Combine(folder, HtmlName);
+        string retentionPath = Path.Combine(folder, RetentionMetadata.FileName);
         using (var textFile = File.Create(textPath))
         using (var htmlFile = File.Create(htmlPath))
         {
@@ -58,8 +59,14 @@ internal static class PackageContents
             textFile.Flush(flushToDisk: true);
             htmlFile.Flush(flushToDisk: true);
         }
+        token.ThrowIfCancellationRequested();
+        using (var file = new FileStream(retentionPath, FileMode.CreateNew, FileAccess.Write))
+        {
+            file.Write(retention.ToJson());
+            file.Flush(flushToDisk: true);
+        }
         var buffer = new byte[1 << 20];
-        ArchivePart[] result = [Measure(textPath), Measure(htmlPath)];
+        ArchivePart[] result = [Measure(textPath), Measure(htmlPath), Measure(retentionPath)];
         report(new(PackageStep.Index, total, total, CountItems: true, Finished: true));
         return result;
 

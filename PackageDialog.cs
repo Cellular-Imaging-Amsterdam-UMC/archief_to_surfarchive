@@ -1,5 +1,7 @@
 namespace SurfArchive;
 
+internal sealed record PackageOptions(bool RemoveOriginals, RetentionMetadata Retention);
+
 internal static class PackageDialog
 {
     public static bool ExplainResume(Form owner)
@@ -13,10 +15,10 @@ internal static class PackageDialog
         Section(2, "1. Find the local recovery folder",
             "Look for “Local package folder kept” in Activity. After a restart, look next to the source data or in the temporary staging folder on L:. Select the local SURF-… folder that contains package.json.");
         Section(4, "2. Finish the upload to the original destination",
-            "The app uploads missing parts and contents files to the same SURF folder. It checks the SHA-256 of every file on SURF, including files already uploaded.");
+            "The app uploads missing package files to the same SURF folder. It checks the SHA-256 of every file on SURF, including files already uploaded.");
         Section(6, "3. Clean up the recovery folder",
             "The app removes local package files only after all checks pass. It leaves the original source files alone. If a check fails, the recovery files remain available for another attempt.");
-        Body(8, "For files already on tape, use Restore from tape or double-click an HTML or TXT file to open a preview.",
+        Body(8, "For files already on tape, use Restore from tape. Double-click an HTML or TXT file to preview it, or retention.json to edit it.",
             DarkTheme.Muted);
 
         var next = DarkTheme.Button("Choose recovery folder…", primary: true);
@@ -81,15 +83,15 @@ internal static class PackageDialog
         return dialog.ShowDialog(owner) == DialogResult.OK ? name : null;
     }
 
-    public static bool? Confirm(Form owner, IReadOnlyList<ArchiveRequest> requests)
+    public static PackageOptions? Confirm(Form owner, IReadOnlyList<ArchiveRequest> requests)
     {
-        using var dialog = CreateDialog("Archive to SURF Data Archive", new Size(764, 543));
-        var layout = Layout([31, 80, 29, 55, 32, -1, 43]);
+        using var dialog = CreateDialog("Archive to SURF Data Archive", new Size(764, 644));
+        var layout = Layout([31, 64, 29, 46, 25, -1, 29, 150, 42, 40]);
         dialog.Controls.Add(layout);
         layout.Controls.Add(DarkTheme.Label("Archive selected data to SURF?", DarkTheme.Heading), 0, 0);
         var explanation = DarkTheme.Label(
             "Compress with fast gzip and split into numbered parts of up to 200 MB. Finished parts upload while " +
-            "packing continues. A text index and a browsable HTML folder tree are included. Local archive parts " +
+            "packing continues. The archive includes contents files and retention.json. Local archive parts " +
             "are removed after every SURF SHA-256 matches. TAR does not preserve Windows permissions.");
         explanation.AutoSize = false;
         explanation.Dock = DockStyle.Fill;
@@ -107,8 +109,10 @@ internal static class PackageDialog
 
         int itemsCount = requests.Sum(request => request.Plan.Entries.Count);
         long bytes = requests.Sum(request => request.Plan.Bytes);
+        string archives = requests.Count == 1 ? "1 archive" : $"{requests.Count:N0} archives";
+        string entries = itemsCount == 1 ? "1 item" : $"{itemsCount:N0} items";
         layout.Controls.Add(DarkTheme.Label(
-            $"{requests.Count:N0} package(s) · {itemsCount:N0} items · {TransferJob.FormatBytes(bytes)} source data" +
+            $"{archives} · {entries} · {TransferJob.FormatBytes(bytes)} source data" +
             (requests.Any(request => request.Plan.UsesFallback) ? " · Some packages need staging on L:" : ""),
             DarkTheme.Small, DarkTheme.Muted), 0, 4);
         var items = DarkTheme.Input("Selected items and package destinations");
@@ -125,17 +129,36 @@ internal static class PackageDialog
         DarkTheme.Explorer(items);
         layout.Controls.Add(items, 0, 5);
 
+        var retention = new RetentionMetadata(DateOnly.FromDateTime(DateTime.Today), new RetentionFields());
+        var fields = new RetentionInput(retention);
+        layout.Controls.Add(DarkTheme.Label(requests.Count > 1 ? "Retention for all selected archives" : "Archive retention",
+            DarkTheme.Heading), 0, 6);
+        layout.Controls.Add(fields, 0, 7);
+        var feedback = StatusLabel("The retention file records your intended minimum storage period. It does not change SURF's storage settings.");
+        layout.Controls.Add(feedback, 0, 8);
+
         var confirm = DarkTheme.Button("Archive and remove originals");
-        confirm.DialogResult = DialogResult.OK;
         var cancel = Cancel();
         var actions = Actions(confirm, cancel);
         actions.Margin = new Padding(0, 7, 0, 0);
-        layout.Controls.Add(actions, 0, 6);
+        layout.Controls.Add(actions, 0, 9);
         dialog.AcceptButton = dialog.CancelButton = cancel;
         dialog.Shown += (_, _) => cancel.Focus();
         remove.CheckedChanged += (_, _) => UpdateWarning();
         UpdateWarning();
-        return dialog.ShowDialog(owner) == DialogResult.OK ? remove.Checked : null;
+        PackageOptions? options = null;
+        confirm.Click += (_, _) =>
+        {
+            if (fields.Read(out string error) is not { } values)
+            {
+                feedback.ForeColor = DarkTheme.Error;
+                feedback.Text = error;
+                return;
+            }
+            options = new PackageOptions(remove.Checked, retention with { Fields = values });
+            dialog.DialogResult = DialogResult.OK;
+        };
+        return dialog.ShowDialog(owner) == DialogResult.OK ? options : null;
 
         void UpdateWarning()
         {
@@ -146,6 +169,72 @@ internal static class PackageDialog
             confirm.Text = remove.Checked ? "Archive and remove originals" : "Archive and keep originals";
             confirm.ForeColor = remove.Checked ? DarkTheme.Error : DarkTheme.Ink;
         }
+    }
+
+    public static bool EditRetention(Form owner, string path, RetentionMetadata original,
+        Func<byte[], Task> save, CancellationToken token)
+    {
+        using var dialog = CreateDialog("Edit archive retention", new Size(690, 394));
+        var layout = Layout([31, 48, 26, -1, 52, 38]);
+        dialog.Controls.Add(layout);
+        layout.Controls.Add(DarkTheme.Label("Edit archive retention", DarkTheme.Heading), 0, 0);
+        layout.Controls.Add(StatusLabel(path), 0, 1);
+        layout.Controls.Add(DarkTheme.Label(original.ArchivedOn is { } date ? $"Archived on {date:yyyy-MM-dd}" : "Archive date unknown",
+            DarkTheme.Small, DarkTheme.Muted), 0, 2);
+        var fields = new RetentionInput(original);
+        layout.Controls.Add(fields, 0, 3);
+        var feedback = StatusLabel("Save updates retention.json on SURF.");
+        layout.Controls.Add(feedback, 0, 4);
+        var confirm = DarkTheme.Button("Save to SURF", primary: true);
+        var cancel = Cancel();
+        layout.Controls.Add(Actions(confirm, cancel), 0, 5);
+        dialog.CancelButton = cancel;
+        bool saving = false;
+        dialog.FormClosing += (_, e) => e.Cancel = saving && !token.IsCancellationRequested;
+        using var registration = token.Register(() =>
+        {
+            if (dialog.IsHandleCreated)
+                dialog.BeginInvoke(() => dialog.Close());
+        });
+        confirm.Click += async (_, _) =>
+        {
+            if (fields.Read(out string validationError) is not { } values)
+            {
+                feedback.ForeColor = DarkTheme.Error;
+                feedback.Text = validationError;
+                return;
+            }
+            saving = true;
+            confirm.Enabled = cancel.Enabled = fields.Enabled = false;
+            feedback.ForeColor = DarkTheme.Muted;
+            feedback.Text = "Saving and checking the updated retention file on SURF…";
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                await save((original with { Fields = values }).ToJson());
+                saving = false;
+                dialog.DialogResult = DialogResult.OK;
+            }
+            catch (Exception error)
+            {
+                saving = false;
+                if (!dialog.IsDisposed)
+                {
+                    confirm.Enabled = cancel.Enabled = fields.Enabled = true;
+                    feedback.ForeColor = DarkTheme.Error;
+                    feedback.Text = error.Message;
+                }
+            }
+        };
+        return dialog.ShowDialog(owner) == DialogResult.OK;
+    }
+
+    private static Label StatusLabel(string text)
+    {
+        var label = DarkTheme.Label(text, DarkTheme.Small, DarkTheme.Muted);
+        label.AutoSize = false;
+        label.Dock = DockStyle.Fill;
+        return label;
     }
 
     private static Form CreateDialog(string title, Size size)

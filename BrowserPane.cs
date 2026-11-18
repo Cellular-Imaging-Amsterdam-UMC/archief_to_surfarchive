@@ -124,7 +124,7 @@ internal sealed class BrowserPane : UserControl
                 return;
             if (entry.IsDirectory)
                 OpenNode(Current?.Nodes.Cast<TreeNode>().FirstOrDefault(child => child.Name == entry.Name));
-            else if (FilePreview.IsSupported(entry.Name))
+            else if (FilePreview.IsSupported(entry.Name) || (!local && RetentionMetadata.IsFileName(entry.Name)))
                 OpenFile?.Invoke(entry);
         };
         files.ItemSelectionChanged += (_, _) => SelectionChanged?.Invoke();

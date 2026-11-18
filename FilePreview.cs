@@ -103,7 +103,8 @@ internal static class FilePreview
                 string name = Path.GetFileName(file);
                 bool partial = name.StartsWith(partialPrefix, StringComparison.Ordinal)
                     && Guid.TryParseExact(name[partialPrefix.Length..], "N", out _);
-                if ((IsSupported(name) || partial) && !File.GetAttributes(file).HasFlag(FileAttributes.ReparsePoint))
+                if ((IsSupported(name) || RetentionMetadata.IsFileName(name) || partial)
+                    && !File.GetAttributes(file).HasFlag(FileAttributes.ReparsePoint))
                     File.Delete(file);
             }
             if (!Directory.EnumerateFileSystemEntries(directory).Any())

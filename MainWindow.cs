@@ -21,6 +21,7 @@ internal sealed class MainWindow : Form
     private CancellationTokenSource? operation;
     private CancellationTokenSource? statusLookup;
     private readonly Dictionary<string, RestoreActivity> restores = new(StringComparer.Ordinal);
+    private readonly SemaphoreSlim retentionEditor = new(1);
     private bool transferring;
     private bool closeWhenIdle;
 
@@ -410,6 +411,7 @@ internal sealed class MainWindow : Form
     {
         if (archive is not { } session)
             return;
+        string previewAction = RetentionMetadata.IsFileName(item.Name) ? "Open retention" : "Open preview";
         string path;
         try { path = ArchiveSession.Child(directory, item.Name); }
         catch (ArgumentException error)
@@ -428,7 +430,7 @@ internal sealed class MainWindow : Form
             }
             if (existing.Polling.RequestPreview())
             {
-                existing.Job.Direction = "Open preview";
+                existing.Job.Direction = previewAction;
                 existing.Job.Notes[1] = "Destination: Temporary Windows preview";
                 transfers.Log("Will open automatically when the file is on disk. Checking every 15 seconds.", existing.Job);
             }
@@ -438,7 +440,7 @@ internal sealed class MainWindow : Form
         }
 
         string target = openWhenReady ? "Temporary Windows preview" : "SURF disk";
-        var job = new TransferJob(item.Name, openWhenReady ? "Open preview" : "Tape restore", path, target, item.Size, tape: true);
+        var job = new TransferJob(item.Name, openWhenReady ? previewAction : "Tape restore", path, target, item.Size, tape: true);
         var activity = new RestoreActivity(job, new RestorePolling(), new CancellationTokenSource());
         if (openWhenReady)
             activity.Polling.RequestPreview();
@@ -482,13 +484,21 @@ internal sealed class MainWindow : Form
 
             if (activity.Polling.OpenWhenReady)
             {
+                bool editRetention = RetentionMetadata.IsFileName(job.Name);
                 local = FilePreview.CreateTemporaryFolder();
                 transfers.Log("SURF confirmed the file is on disk. Downloading a temporary copy.", job);
-                await Task.Run(() => session.DownloadPreview(path, local, new Callback<TransferProgress>(job.Report), token));
+                await Task.Run(() => session.DownloadPreview(path, local, new Callback<TransferProgress>(job.Report), token,
+                    editRetention ? RetentionMetadata.MaximumFileSize : null));
                 token.ThrowIfCancellationRequested();
                 if (IsDisposed)
                     return;
-                FilePreview.Open(Path.Combine(local, job.Name));
+                string localPath = Path.Combine(local, job.Name);
+                if (editRetention)
+                {
+                    await OpenRetention(session, directory, path, localPath, job, token);
+                    return;
+                }
+                FilePreview.Open(localPath);
                 opened = true;
                 transfers.Log("Opened the temporary local copy.", job);
                 transfers.Finish(job, TransferState.Completed);
@@ -531,6 +541,52 @@ internal sealed class MainWindow : Form
         }
     }
 
+    private async Task OpenRetention(ArchiveSession session, string directory, string path, string localPath,
+        TransferJob job, CancellationToken token)
+    {
+        var (metadata, originalSha) = RetentionMetadata.Read(localPath);
+        await retentionEditor.WaitAsync(token);
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            transfers.Log("Opened a copy in the retention editor.", job);
+            transfers.Finish(job, TransferState.Completed);
+            bool saved = PackageDialog.EditRetention(this, path, metadata, Save, token);
+            if (saved && operation is null && !IsDisposed)
+                SetFeedback("Retention saved on SURF.");
+        }
+        finally
+        {
+            retentionEditor.Release();
+        }
+
+        async Task Save(byte[] payload)
+        {
+            var saveJob = new TransferJob(job.Name, "Save retention", "Retention editor", path, payload.Length,
+                working: "Uploading");
+            transfers.Add(saveJob);
+            try
+            {
+                await Task.Run(() => session.SaveRetention(directory, job.Name, originalSha, payload,
+                    new Callback<TransferProgress>(saveJob.Report), token));
+                if (!IsDisposed)
+                {
+                    transfers.Log("The SHA-256 matched. The retention file was updated on SURF.", saveJob);
+                    transfers.Finish(saveJob, TransferState.Completed);
+                }
+            }
+            catch (Exception error)
+            {
+                if (!IsDisposed)
+                {
+                    transfers.Log(error.Message, saveJob);
+                    transfers.Finish(saveJob, token.IsCancellationRequested ? TransferState.Cancelled : TransferState.Failed);
+                }
+                throw;
+            }
+        }
+    }
+
     private void StopRestores()
     {
         var pending = restores.Values.ToArray();
@@ -559,8 +615,8 @@ internal sealed class MainWindow : Form
             SetFeedback("Scanning selected data and checking staging space…");
             var requests = await Task.Run(() => ArchivePackage.PlanSelection(source, destination, selection, filesFolderName, token));
             await Task.Run(() => archive!.CheckArchiveDestinations(requests, token));
-            bool? removeOriginals = PackageDialog.Confirm(this, requests);
-            if (removeOriginals is null)
+            var options = PackageDialog.Confirm(this, requests);
+            if (options is null)
             {
                 SetFeedback("");
                 return;
@@ -571,11 +627,11 @@ internal sealed class MainWindow : Form
                 token.ThrowIfCancellationRequested();
                 await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
                     ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
-                        target, removeOriginals.Value, progress, token), token);
+                        target, options, progress, token), token);
             }
             await NavigateLocal(source, null);
             await NavigateRemote(destination, null);
-            SetFeedback(removeOriginals.Value
+            SetFeedback(options.RemoveOriginals
                 ? "Archives uploaded and verified. Originals and local archive parts removed."
                 : "Archives uploaded and verified. Originals kept.");
         }, transfer: true);
@@ -648,11 +704,17 @@ internal sealed class MainWindow : Form
             {
                 if (!stages.TryGetValue(meter.Step, out var job))
                 {
-                    job = new TransferJob(name, StepCaption(meter.Step), recovery, destination, meter.Total, meter.CountItems);
+                    var (caption, working, detail, showRate) = DescribeStep(meter.Step);
+                    job = new TransferJob(name, caption, recovery, destination, meter.Total, meter.CountItems,
+                        totalKnown: meter.TotalKnown, working: working, showRate: showRate && !meter.CountItems);
                     stages.Add(meter.Step, job);
-                    Invoke(() => transfers.Add(job));
+                    Invoke(() =>
+                    {
+                        transfers.Add(job);
+                        transfers.Log(detail, job);
+                    });
                 }
-                job.Report(new(name, meter.Done, meter.Total));
+                job.Report(new(name, meter.Done, meter.Total, meter.TotalKnown));
                 if (meter.Finished)
                 {
                     Invoke(() => transfers.Finish(job, meter.Skipped ? TransferState.Skipped : TransferState.Completed));
@@ -662,15 +724,15 @@ internal sealed class MainWindow : Form
         }
     }
 
-    private static string StepCaption(PackageStep step) => step switch
+    private static (string Caption, string Working, string Detail, bool ShowRate) DescribeStep(PackageStep step) => step switch
     {
-        PackageStep.Archive => "Compress TAR",
-        PackageStep.Verify => "Verify local TAR",
-        PackageStep.Index => "Write contents",
-        PackageStep.RemoveOriginals => "Remove originals",
-        PackageStep.Upload => "Upload parts",
-        PackageStep.RemoteSha => "SURF SHA-256",
-        _ => "Remove local parts"
+        PackageStep.Archive => ("Compress source", "Compressing", "Source data read for compression.", true),
+        PackageStep.Verify => ("Check local archive", "Checking", "Local package bytes read for verification.", true),
+        PackageStep.Index => ("Write archive metadata", "Writing", "Items indexed for the contents files. Also writes retention.json.", false),
+        PackageStep.RemoveOriginals => ("Remove originals", "Removing", "Original items checked and removed from Windows.", false),
+        PackageStep.Upload => ("Upload to SURF", "Uploading", "Measures package bytes sent to SURF. The final size includes compressed parts and metadata.", true),
+        PackageStep.RemoteSha => ("Check SURF checksums", "Checking", "Package bytes covered by matching SHA-256 checksums. Updates after each file.", false),
+        _ => ("Clean up local package", "Cleaning up", "Local package files checked for cleanup.", false)
     };
 
     private async Task ConfirmRemoval(bool local)

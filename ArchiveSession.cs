@@ -8,7 +8,7 @@ namespace SurfArchive;
 
 internal record ArchiveEntry(string Name, bool IsDirectory, long Size, DateTime Modified,
     ArchiveState? Status = null);
-internal record TransferProgress(string Name, long Bytes, long Total);
+internal record TransferProgress(string Name, long Bytes, long Total, bool TotalKnown = true);
 
 internal sealed class ArchiveSession : IDisposable
 {
@@ -206,15 +206,15 @@ internal sealed class ArchiveSession : IDisposable
         return command.Result;
     }
 
-    private async Task CopyUp(FileStream input, string destination, string name,
+    private static async Task CopyUp(SftpClient client, Stream input, string destination, string name,
         IProgress<TransferProgress> progress, CancellationToken token)
     {
         long size = input.Length;
         var report = new Callback<UploadFileProgressReport>(value =>
             progress.Report(new(name, checked((long)value.TotalBytesUploaded), size)));
         progress.Report(new(name, 0, size));
-        await sftp.UploadFileAsync(input, destination, canOverride: false, report, token);
-        if (sftp.GetAttributes(destination).Size != size)
+        await client.UploadFileAsync(input, destination, canOverride: false, report, token);
+        if (client.GetAttributes(destination).Size != size)
             throw new IOException("The file size on SURF differs from the source.");
         progress.Report(new(name, size, size));
     }
@@ -234,7 +234,7 @@ internal sealed class ArchiveSession : IDisposable
 
         try
         {
-            await CopyUp(input, staging, name, progress, token);
+            await CopyUp(sftp, input, staging, name, progress, token);
             token.ThrowIfCancellationRequested();
             // Standard SFTP rename refuses to overwrite an existing target.
             await sftp.RenameFileAsync(staging, destination, CancellationToken.None);
@@ -285,16 +285,71 @@ internal sealed class ArchiveSession : IDisposable
     }
 
     public async Task DownloadPreview(string source, string localDirectory,
-        IProgress<TransferProgress> progress, CancellationToken token)
+        IProgress<TransferProgress> progress, CancellationToken token, long? maximumSize = null)
     {
         // Previews may become available while the regular SFTP connection is busy with another transfer.
         using var client = CreateSftpClient();
         await client.ConnectAsync(token);
-        await CopyToLocal(client, source, localDirectory, progress, token);
+        await CopyToLocal(client, source, localDirectory, progress, token, maximumSize);
+    }
+
+    public async Task SaveRetention(string directory, string name, string originalSha, byte[] payload,
+        IProgress<TransferProgress> progress, CancellationToken token)
+    {
+        if (!RetentionMetadata.IsFileName(name) || originalSha.Length != 64 || !originalSha.All(Uri.IsHexDigit) ||
+            payload.Length > RetentionMetadata.MaximumFileSize ||
+            (directory != Root && !directory.StartsWith(Root + "/", StringComparison.Ordinal)))
+            throw new IOException("Invalid SURF retention file.");
+
+        string path = Child(directory, name);
+        string stageName = ".surfarchive-retention-" + Guid.NewGuid().ToString("N");
+        string staging = Child(directory, stageName);
+        string source = Quote("./" + stageName), destination = Quote("./" + name);
+        using var client = CreateSftpClient();
+        using var ssh = await OpenShellAsync(token);
+        await client.ConnectAsync(token);
+        string verifiedDirectory = $"cd -- {Quote(Root)} && root=$(pwd -P) && cd -- {Quote(directory)} && " +
+            "case \"$(pwd -P)/\" in \"$root/\"*) ;; *) exit 4 ;; esac && ";
+        await RunAsync(ssh, verifiedDirectory + $"test ! -L {destination} && test -f {destination}", token);
+
+        try
+        {
+            using var input = new MemoryStream(payload, writable: false);
+            await CopyUp(client, input, staging, name, progress, token);
+            if (!ArchiveStatus.IsOnDisk(await ReadState(ssh, Quote(path), token)))
+                throw new IOException("The retention file has returned to tape. Reopen it to restore the latest copy before saving.");
+            string expected = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+            string previous = originalSha.ToLowerInvariant();
+            token.ThrowIfCancellationRequested();
+            string result = await RunAsync(ssh, verifiedDirectory +
+                $"test ! -L {source} && test -f {source} && test ! -L {destination} && test -f {destination} && " +
+                $"staged=$(sha256sum < {source}) && current=$(sha256sum < {destination}) && " +
+                $"if test \"${{staged%% *}}\" != '{expected}'; then echo checksum; " +
+                $"elif test \"${{current%% *}}\" != '{previous}'; then echo changed; " +
+                $"else chmod --reference={destination} -- {source} && mv -fT -- {source} {destination} && echo saved; fi",
+                CancellationToken.None);
+            if (result.Trim() == "changed")
+                throw new IOException("The retention file changed on SURF. Reopen it before saving your changes.");
+            if (result.Trim() != "saved")
+                throw new IOException("SURF could not verify the updated retention file.");
+        }
+        catch (Exception error)
+        {
+            try
+            {
+                using var cleanup = OpenShell();
+                Run(cleanup, verifiedDirectory + $"rm -f -- {source}");
+            }
+            catch (Exception cleanup)
+            {
+                throw new IOException($"{error.Message} Could not clean up the temporary file {staging}: {cleanup.Message}", error);
+            }
+            throw;
+        }
     }
 
     private static async Task CopyToLocal(SftpClient client, string source, string localDirectory,
-        IProgress<TransferProgress> progress, CancellationToken token)
+        IProgress<TransferProgress> progress, CancellationToken token, long? maximumSize = null)
     {
         token.ThrowIfCancellationRequested();
         string name = source[(source.LastIndexOf('/') + 1)..];
@@ -306,6 +361,8 @@ internal sealed class ArchiveSession : IDisposable
 
         string staging = Path.Combine(localDirectory, ".surfarchive-download-" + Guid.NewGuid().ToString("N"));
         long size = client.GetAttributes(source).Size;
+        if (maximumSize is { } limit && size > limit)
+            throw new IOException("The retention file is too large to edit.");
         var report = new Callback<DownloadFileProgressReport>(value =>
             progress.Report(new(name, checked((long)value.TotalBytesDownloaded), size)));
         var output = new FileStream(staging, FileMode.CreateNew, FileAccess.Write, FileShare.None,
@@ -351,7 +408,7 @@ internal sealed class ArchiveSession : IDisposable
         try
         {
             log($"Temporary SURF path: {destination}");
-            await CopyUp(input, destination, name, progress, token);
+            await CopyUp(sftp, input, destination, name, progress, token);
             token.ThrowIfCancellationRequested();
             log(Run(ssh, "dals -l -q " + quotedFile));
             string actual = Run(ssh, "sha256sum < " + quotedFile, timeoutSeconds: 90)
