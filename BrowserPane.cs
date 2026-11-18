@@ -120,8 +120,12 @@ internal sealed class BrowserPane : UserControl
         };
         files.ItemActivate += (_, _) =>
         {
-            if (files.SelectedItems.Count == 1 && files.SelectedItems[0].Tag is ArchiveEntry { IsDirectory: true } entry)
+            if (!canNavigate || files.SelectedItems.Count != 1 || files.SelectedItems[0].Tag is not ArchiveEntry entry)
+                return;
+            if (entry.IsDirectory)
                 OpenNode(Current?.Nodes.Cast<TreeNode>().FirstOrDefault(child => child.Name == entry.Name));
+            else if (FilePreview.IsSupported(entry.Name))
+                OpenFile?.Invoke(entry);
         };
         files.ItemSelectionChanged += (_, _) => SelectionChanged?.Invoke();
         files.ColumnClick += (_, e) =>
@@ -146,6 +150,7 @@ internal sealed class BrowserPane : UserControl
 
     public event Action<string, string?>? Navigate;
     public event Action<RecentFolder>? NavigateRecent;
+    public event Action<ArchiveEntry>? OpenFile;
     public event Action? SelectionChanged;
     public string PathShown { get; private set; } = "";
     public bool HasFolder => Current is not null;

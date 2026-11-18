@@ -340,6 +340,11 @@ internal sealed class TransferLog : UserControl
 
     private sealed class BufferedGrid : DataGridView
     {
-        public BufferedGrid() => DoubleBuffered = true;
+        public BufferedGrid()
+        {
+            DoubleBuffered = true;
+            DarkTheme.Explorer(VerticalScrollBar);
+            DarkTheme.Explorer(HorizontalScrollBar);
+        }
     }
 }

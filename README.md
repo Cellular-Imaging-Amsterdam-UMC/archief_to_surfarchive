@@ -10,6 +10,8 @@ Windows x64 file manager for SURF Data Archive. Browse Archief or another Window
 
 Only direct subfolders of `L:\Archief\Active` are checked in advance. A subfolder is listed when the app can open it, including when it is empty. Deeper folders are opened on demand.
 
+Double-click an HTML file (`.html` or `.htm`) to open it in your Windows browser, or a `.txt` file to open it in Notepad. On SURF, the file must be available on disk. The app opens a temporary Windows copy and checks for previews older than seven days at startup. Edits to a temporary copy stay local. Remote HTML files that depend on other files need those assets downloaded separately.
+
 The app uses SFTP on port 22 and verifies the [host keys published by SURF](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/62227258/Data+Archive+Accessing+the+service). Normal copies verify file size before receiving their final names and refuse to overwrite an existing destination. After an interruption, start the direct copy again from the beginning.
 
 ## Archive workflow

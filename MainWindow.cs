@@ -43,6 +43,8 @@ internal sealed class MainWindow : Form
         surf.Navigate += async (path, root) => await Run(_ => NavigateRemote(path, root));
         windows.NavigateRecent += async folder => await Run(_ => OpenRecent(folder, local: true));
         surf.NavigateRecent += async folder => await Run(_ => OpenRecent(folder, local: false));
+        windows.OpenFile += async file => await OpenPreview(file, local: true);
+        surf.OpenFile += async file => await OpenPreview(file, local: false);
         windows.SelectionChanged += UpdateControls;
         surf.SelectionChanged += UpdateControls;
         signIn.Click += async (_, _) => await Run(ToggleLogin);
@@ -116,8 +118,9 @@ internal sealed class MainWindow : Form
         layout.Controls.Add(feedback, 0, 4);
     }
 
-    private async Task InitialLoad(CancellationToken _)
+    private async Task InitialLoad(CancellationToken token)
     {
+        _ = Task.Run(FilePreview.PruneTemporaryFolders, token);
         var local = LoadDefaultLocal();
         if (archive is null)
         {
@@ -284,6 +287,55 @@ internal sealed class MainWindow : Form
         surf.SetHistory(new RecentFolders(archive.Root));
         await NavigateRemote(archive.Root, "My archive");
         SetFeedback("");
+    }
+
+    private async Task OpenPreview(ArchiveEntry file, bool local)
+    {
+        if (local)
+        {
+            string path = Path.Combine(windows.PathShown, file.Name);
+            await Run(_ =>
+            {
+                FilePreview.Open(path);
+                SetFeedback($"Opened {file.Name}.");
+                return Task.CompletedTask;
+            });
+            return;
+        }
+
+        if (ArchiveStatus.CanRestore(file.Status))
+        {
+            SetFeedback($"{ArchiveStatus.Label(file.Status!.Value)}. Use Restore from tape, then double-click when ready.");
+            return;
+        }
+
+        if (archive is null)
+            return;
+        string source = ArchiveSession.Child(surf.PathShown, file.Name);
+        await Run(async token =>
+        {
+            string directory = FilePreview.CreateTemporaryFolder();
+            var job = new TransferJob(file.Name, "Open preview", source, directory, file.Size);
+            transfers.Add(job);
+            try
+            {
+                job.SetPhase(TransferState.CheckingStatus);
+                await Task.Run(() => archive.Download(source, directory, new Callback<TransferProgress>(job.Report), token));
+                token.ThrowIfCancellationRequested();
+                FilePreview.Open(Path.Combine(directory, file.Name));
+                transfers.Log("Opened a temporary local copy.", job);
+                transfers.Finish(job, TransferState.Completed);
+                SetFeedback($"Opened a temporary copy of {file.Name}.");
+            }
+            catch (Exception error)
+            {
+                FilePreview.TryRemoveTemporaryFolder(directory);
+                transfers.Log(error.Message, job);
+                transfers.Finish(job, error is OperationCanceledException && token.IsCancellationRequested
+                    ? TransferState.Cancelled : TransferState.Failed);
+                throw;
+            }
+        }, transfer: true);
     }
 
     private async Task UploadDirect()
