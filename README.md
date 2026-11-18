@@ -30,6 +30,8 @@ Set retention in the archive confirmation. `retention.json` stores `minimum_year
 
 Double-click `retention.json` in the SURF pane to edit it. If it is on tape, the app requests a restore and checks every 15 seconds. **Save to SURF** checks the new file and checks for changes to the copy on SURF before replacing it.
 
+`contents.html` explains how to extract with File Explorer, Windows `tar.exe`, and 7-Zip. For a multipart archive it includes a PowerShell block to join every numbered part in order. Its short part list shows the first nine and the last part. The full list with checksums is in `contents.txt`. The HTML also shows the retention values recorded at archiving. After editing `retention.json`, download the updated JSON and select it in the HTML to display the latest values.
+
 The gzip parts form one TAR stream. Download all parts and concatenate them in numeric order before extracting. On Linux or in Git Bash, run `cat -- ./*.tar.gz | tar -xzf -` from the package folder. A single part can be opened directly if it is the entire package. For older uncompressed packages with `data.tar.part-*`, use `cat data.tar.part-* | tar -xf -`. These 200 MB parts are smaller than [SURF’s preferred 1–200 GB per archive file](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/62227277/Data+Archive+Effective+archive+file+management). For tape status and restore commands, see [SURF DAcommands](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/166920955/Data+Archive+DA+Commands).
 
 The app stores only the username in `%LOCALAPPDATA%\SurfArchive\username.txt` when you opt in. A successful sign-in with **Remember username** cleared removes the saved username. A legacy password file is removed at startup.
