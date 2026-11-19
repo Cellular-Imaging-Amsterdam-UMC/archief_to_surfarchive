@@ -3,11 +3,17 @@ namespace SurfArchive;
 internal sealed class ArchiveQueuePanel : UserControl
 {
     public const int EmptyHeight = 52;
-    private const int PauseColumn = 3;
+    private const int RunColumn = 3;
     private const int RemoveColumn = 4;
     private readonly ActivityGrid jobs = new() { AccessibleName = "Archive queue items" };
     private readonly Label summary = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private readonly Button removeFinished = DarkTheme.Button("Remove all finished", ActionIcon.Trash);
+    private readonly ToolStripMenuItem browseRecovery = new("Choose recovery folder…");
+    private readonly ContextMenuStrip queueMenu = new()
+    {
+        BackColor = DarkTheme.Raised, ForeColor = DarkTheme.Ink, Font = DarkTheme.Small, ShowImageMargin = false
+    };
+    private bool recoveryAvailable;
 
     public ArchiveQueuePanel()
     {
@@ -26,6 +32,10 @@ internal sealed class ArchiveQueuePanel : UserControl
             DarkTheme.Label("  Queue", DarkTheme.Heading), summary), 0, 0);
         heading.Controls.Add(removeFinished, 1, 0);
         removeFinished.Click += (_, _) => RemoveFinished?.Invoke();
+        browseRecovery.Click += (_, _) => BrowseRecovery?.Invoke();
+        queueMenu.Items.Add(browseRecovery);
+        ContextMenuStrip = queueMenu;
+        jobs.ContextMenuStrip = queueMenu;
         layout.Controls.Add(heading, 0, 0);
         layout.Controls.Add(jobs, 0, 1);
         Controls.Add(layout);
@@ -52,9 +62,22 @@ internal sealed class ArchiveQueuePanel : UserControl
     public event Action<ArchiveQueueItem>? TogglePause;
     public event Action<ArchiveQueueItem>? RemoveItem;
     public event Action? RemoveFinished;
+    public event Action<ArchiveQueueItem>? ResumeUpload;
+    public event Action? BrowseRecovery;
 
     public static int HeightFor(int count) => count == 0 ? EmptyHeight
         : EmptyHeight + ActivityGrid.HeaderHeight + ActivityGrid.ItemHeight * Math.Min(count, 3) + 8;
+
+    public void SetRecoveryAvailable(bool available)
+    {
+        browseRecovery.Enabled = available;
+        if (recoveryAvailable == available)
+            return;
+        recoveryAvailable = available;
+        foreach (DataGridViewRow row in jobs.Rows)
+            if (row.Tag is ArchiveQueueItem { CanResumeUpload: true })
+                SetRecoveryAction(row);
+    }
 
     public void ShowItems(IReadOnlyList<ArchiveQueueItem> items)
     {
@@ -90,9 +113,11 @@ internal sealed class ArchiveQueuePanel : UserControl
                 _ => DarkTheme.Ink
             };
             if (item.State == ArchiveQueueState.Queued)
-                SetAction(row, PauseColumn, ActionIcon.Pause, "Pause");
-            if (item.State == ArchiveQueueState.Paused)
-                SetAction(row, PauseColumn, ActionIcon.Play, "Resume");
+                SetAction(row, RunColumn, ActionIcon.Pause, "Pause");
+            else if (item.State == ArchiveQueueState.Paused)
+                SetAction(row, RunColumn, ActionIcon.Play, "Resume");
+            else if (item.CanResumeUpload)
+                SetRecoveryAction(row);
             if (item.State != ArchiveQueueState.Running)
                 SetAction(row, RemoveColumn, ActionIcon.Trash, "Remove from queue");
         }
@@ -110,23 +135,39 @@ internal sealed class ArchiveQueuePanel : UserControl
         DefaultCellStyle = new DataGridViewCellStyle { NullValue = null, Padding = Padding.Empty }
     });
 
-    private static void SetAction(DataGridViewRow row, int column, ActionIcon icon, string label)
+    private void SetRecoveryAction(DataGridViewRow row) =>
+        SetAction(row, RunColumn, ActionIcon.Recovery,
+            recoveryAvailable ? "Resume archive upload" : "Resume archive upload when the app is idle", recoveryAvailable);
+
+    private static void SetAction(DataGridViewRow row, int column, ActionIcon icon, string label, bool enabled = true)
     {
         var cell = (DataGridViewImageCell)row.Cells[column];
-        cell.Value = ActionIcons.Get(icon, DarkTheme.Ink, 15);
+        cell.Value = ActionIcons.Get(icon, enabled ? DarkTheme.Ink : DarkTheme.Muted, 15);
         cell.Description = label;
         cell.ToolTipText = label;
     }
 
     private bool InvokeAction(int row, int column)
     {
-        if (row < 0 || (column != PauseColumn && column != RemoveColumn) ||
+        if (row < 0 || (column != RunColumn && column != RemoveColumn) ||
             jobs.Rows[row].Tag is not ArchiveQueueItem item || jobs.Rows[row].Cells[column].Value is null)
             return false;
         if (column == RemoveColumn)
             RemoveItem?.Invoke(item);
+        else if (item.CanResumeUpload)
+        {
+            if (recoveryAvailable)
+                ResumeUpload?.Invoke(item);
+        }
         else
             TogglePause?.Invoke(item);
         return true;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            queueMenu.Dispose();
+        base.Dispose(disposing);
     }
 }

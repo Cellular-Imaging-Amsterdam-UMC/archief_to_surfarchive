@@ -200,11 +200,14 @@ internal static class ArchivePackage
     }
 
     public static async Task Resume(string folder, IPackageDestination target, Action<PackageMeter> report,
-        CancellationToken token)
+        CancellationToken token, PackageManifest? confirmed = null)
     {
         using (var jobLock = Lock(folder))
         {
             var manifest = ReadManifest(folder);
+            if (confirmed is not null && (manifest with { Parts = confirmed.Parts } != confirmed
+                || !manifest.Parts.SequenceEqual(confirmed.Parts)))
+                throw new IOException("The recovery manifest changed after confirmation. Review the package and try again.");
             if (manifest.ArchiveRoot != target.Root)
                 throw new IOException("This package was prepared for a different SURF account.");
             var available = manifest.Parts.Where(part => File.Exists(Path.Combine(folder, part.Name))).ToArray();

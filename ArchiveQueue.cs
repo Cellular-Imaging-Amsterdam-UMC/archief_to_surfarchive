@@ -13,6 +13,10 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
     [JsonIgnore]
     public string RemotePath => ArchiveSession.Child(Parent, Name);
 
+    [JsonIgnore]
+    public bool CanResumeUpload => RecoveryPath is not null
+        && State is ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled;
+
     public static ArchiveQueueItem FromRequest(ArchiveRequest request, PackageOptions options, CancellationToken token) =>
         new(request.LocalName, request.Name, request.Plan.Source, request.Parent, request.Items.ToArray(),
             Fingerprint(request.Plan, token), options);
@@ -103,6 +107,15 @@ internal sealed class ArchiveQueue : IDisposable
     }
 
     public void SetRecoveryPath(ArchiveQueueItem item, string path) => Replace(item, item with { RecoveryPath = path });
+
+    public void StartRecovery(ArchiveQueueItem item, string folder)
+    {
+        if (!items.Contains(item) || item.State is not (ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled)
+            || items.Any(other => other.State == ArchiveQueueState.Running))
+            throw new IOException("This queue item is no longer available for recovery.");
+        CheckDestinations([item.RemotePath]);
+        Replace(item, item with { State = ArchiveQueueState.Running, RecoveryPath = folder, Detail = null });
+    }
 
     public void Finish(string localName, ArchiveQueueState state, string? detail = null)
     {

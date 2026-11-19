@@ -13,8 +13,6 @@ internal sealed class MainWindow : Form
     private readonly Button download = DarkTheme.Button("Download", ActionIcon.Download, primary: true);
     private readonly Button restore = DarkTheme.Button("Restore from tape", ActionIcon.Tape);
     private readonly Button package = DarkTheme.Button("Archive to SURF…", ActionIcon.Archive, primary: true);
-    private readonly Button resume = DarkTheme.Button("Resume archive upload…", ActionIcon.Recovery);
-    private readonly ToolTip help = new();
     private readonly Button removeWindows = DarkTheme.Button("Remove…", ActionIcon.Trash);
     private readonly Button removeSurf = DarkTheme.Button("Remove…", ActionIcon.Trash);
     private readonly Button newFolder = DarkTheme.Button("New folder", ActionIcon.FolderPlus);
@@ -38,7 +36,6 @@ internal sealed class MainWindow : Form
         ClientSize = new Size(1410, 850);
         StartPosition = FormStartPosition.CenterScreen;
         BuildLayout();
-        help.SetToolTip(resume, "Continue an interrupted upload from a local recovery folder containing package.json.");
 
         windows.AddLocation(LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive);
         windows.AddLocation(LocalFiles.BasicFolder, LocalFiles.BasicFolder);
@@ -64,7 +61,6 @@ internal sealed class MainWindow : Form
         download.Click += async (_, _) => await Run(token => Copy(toSurf: false, token), transfer: true);
         restore.Click += (_, _) => StartRestores();
         package.Click += async (_, _) => await ArchiveSelected();
-        resume.Click += async (_, _) => await ResumeArchive();
         removeWindows.Click += async (_, _) => await ConfirmRemoval(local: true);
         removeSurf.Click += async (_, _) => await ConfirmRemoval(local: false);
         removeWindows.AccessibleName = "Remove selected Local / NAS items";
@@ -84,6 +80,8 @@ internal sealed class MainWindow : Form
         };
         queuePanel.RemoveItem += item => ChangeQueue(() => archiveQueue.Remove(item));
         queuePanel.RemoveFinished += () => ChangeQueue(archiveQueue.RemoveFinished);
+        queuePanel.ResumeUpload += async item => await ResumeArchive(item);
+        queuePanel.BrowseRecovery += async () => await ResumeArchive();
         Shown += async (_, _) => await Run(InitialLoad);
         FormClosing += OnClosing;
         FormClosed += (_, _) =>
@@ -91,7 +89,6 @@ internal sealed class MainWindow : Form
             StopStatusLookup();
             StopRestores();
             archiveQueue.Dispose();
-            help.Dispose();
             archive?.Dispose();
         };
         UpdateControls();
@@ -115,7 +112,6 @@ internal sealed class MainWindow : Form
         header.ColumnStyles.Add(new(SizeType.Percent, 100));
         header.ColumnStyles.Add(new(SizeType.AutoSize));
         header.ColumnStyles.Add(new(SizeType.AutoSize));
-        header.Controls.Add(DarkTheme.Row(resume), 0, 0);
         connection.Margin = new Padding(0, 5, 17, 0);
         header.Controls.Add(connection, 1, 0);
         header.Controls.Add(signIn, 2, 0);
@@ -950,37 +946,73 @@ internal sealed class MainWindow : Form
             SetFeedback($"{item.Name} was uploaded and verified.");
     }
 
-    private async Task ResumeArchive()
+    private async Task ResumeArchive(ArchiveQueueItem? selected = null)
+    {
+        if (archive is null || operation is not null || archiveOperation is not null || closeWhenIdle)
+            return;
+        await Run(async token =>
+        {
+            string? folder = selected is null ? PickRecoveryFolder() : selected.RecoveryPath;
+            if (folder is null)
+                return;
+
+            PackageManifest manifest;
+            try { manifest = await Task.Run(() => ArchivePackage.ReadManifest(folder), token); }
+            catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+            {
+                throw new IOException($"No verified package.json was found in {folder}. Packing or verification may have been interrupted.", error);
+            }
+            if (manifest.ArchiveRoot != archive.Root)
+                throw new IOException("This package was prepared for a different SURF account.");
+            string remote = ArchiveSession.Child(manifest.Destination, manifest.RemoteName);
+            if (selected is not null && (manifest.Name != selected.LocalName || remote != selected.RemotePath))
+                throw new IOException("The local recovery package does not match this queue item.");
+            var item = selected ?? archiveQueue.Items.FirstOrDefault(job => job.LocalName == manifest.Name &&
+                job.RemotePath == remote && job.State is ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled);
+
+            if (MessageBox.Show(this,
+                $"Local recovery package:\n{folder}\n\nSURF destination:\n{remote}\n\nThe app uploads missing parts and checks every SURF checksum. It then removes the local package parts. Your original files stay in place.",
+                "Resume archive upload", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.OK)
+                return;
+
+            token.ThrowIfCancellationRequested();
+            if (item is not null)
+                archiveQueue.StartRecovery(item, folder);
+            try
+            {
+                await RunPackage(manifest.RemoteName, folder, remote, (target, progress) =>
+                    ArchivePackage.Resume(folder, target, progress, token, manifest), token);
+            }
+            catch (Exception error)
+            {
+                if (item is not null)
+                {
+                    var state = error is OperationCanceledException && token.IsCancellationRequested
+                        ? closeWhenIdle ? ArchiveQueueState.Interrupted : ArchiveQueueState.Cancelled
+                        : ArchiveQueueState.Failed;
+                    ChangeQueue(() => archiveQueue.Finish(item.LocalName, state, error.Message));
+                }
+                throw;
+            }
+            if (item is not null)
+                ChangeQueue(() => archiveQueue.Finish(item.LocalName, ArchiveQueueState.Finished));
+            if (!closeWhenIdle && surf.HasFolder)
+                await NavigateRemote(surf.PathShown, null);
+            SetFeedback("Archive upload verified. Remaining local archive parts removed.");
+        }, transfer: true);
+    }
+
+    private string? PickRecoveryFolder()
     {
         if (!PackageDialog.ExplainResume(this))
-            return;
+            return null;
         using var picker = new FolderBrowserDialog
         {
             Description = "Select the local SURF package folder containing package.json.",
             UseDescriptionForTitle = true, ShowNewFolderButton = false, SelectedPath = windows.PathShown
         };
-        if (picker.ShowDialog(this) != DialogResult.OK)
-            return;
-        string folder = picker.SelectedPath;
-        await Run(async token =>
-        {
-            var manifest = await Task.Run(() => ArchivePackage.ReadManifest(folder));
-            string remote = ArchiveSession.Child(manifest.Destination, manifest.RemoteName);
-            if (MessageBox.Show(this,
-                $"Resume uploading to:\n{remote}\n\nLocal archive parts will be removed after every SURF checksum matches.",
-                "Resume archive upload", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2) != DialogResult.OK)
-            {
-                SetFeedback("");
-                return;
-            }
-            await RunPackage(manifest.RemoteName, folder, remote, (target, progress) =>
-                ArchivePackage.Resume(folder, target, progress, token), token);
-            ChangeQueue(() => archiveQueue.Finish(manifest.Name, ArchiveQueueState.Finished));
-            if (surf.HasFolder)
-                await NavigateRemote(surf.PathShown, null);
-            SetFeedback("Archive upload verified. Remaining local archive parts removed.");
-        }, transfer: true);
+        return picker.ShowDialog(this) == DialogResult.OK ? picker.SelectedPath : null;
     }
 
     private async Task RunPackage(string name, string recovery, string destination,
@@ -1231,7 +1263,7 @@ internal sealed class MainWindow : Form
             (item.IsDirectory ? item.HasSubfolders != true && !ArchiveStatus.IsOnDisk(item.Status) : ArchiveStatus.CanRestore(item.Status))
             && !restores.ContainsKey(ArchiveSession.Child(surf.PathShown, item.Name)));
         package.Enabled = idle && online && archiveQueue.IsAvailable && surf.HasFolder && ArchivePackage.CanArchive(localSelection);
-        resume.Enabled = transferIdle && online;
+        queuePanel.SetRecoveryAvailable(transferIdle && online);
         removeWindows.Enabled = transferIdle && windows.SelectedItems.Count > 0;
         removeSurf.Enabled = transferIdle && online && surf.SelectedItems.Count > 0;
         newFolder.Enabled = transferIdle && online && surf.HasFolder;
