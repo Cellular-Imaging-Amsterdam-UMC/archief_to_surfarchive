@@ -2,28 +2,33 @@ namespace SurfArchive;
 
 internal sealed class MainWindow : Form
 {
-    private readonly BrowserPane windows = new("Archief / Windows", local: true);
+    private readonly BrowserPane windows = new("Local / NAS", local: true);
     private readonly BrowserPane surf = new("SURF Data Archive", local: false);
     private readonly TransferLog transfers = new();
-    private readonly Button signIn = DarkTheme.Button("Sign out");
-    private readonly Button upload = DarkTheme.Button("Upload to SURF  →", primary: true);
-    private readonly Button download = DarkTheme.Button("← Download", primary: true);
-    private readonly Button restore = DarkTheme.Button("Restore from tape");
-    private readonly Button package = DarkTheme.Button("Archive to SURF…", primary: true);
-    private readonly Button resume = DarkTheme.Button("Resume archive upload…");
+    private readonly ArchiveQueue archiveQueue = new();
+    private readonly ArchiveQueuePanel queuePanel = new();
+    private readonly RowStyle queueHeight = new(SizeType.Absolute, ArchiveQueuePanel.EmptyHeight);
+    private readonly Button signIn = DarkTheme.Button("Sign out", ActionIcon.SignOut);
+    private readonly Button upload = DarkTheme.Button("Upload to SURF", ActionIcon.Upload, primary: true);
+    private readonly Button download = DarkTheme.Button("Download", ActionIcon.Download, primary: true);
+    private readonly Button restore = DarkTheme.Button("Restore from tape", ActionIcon.Tape);
+    private readonly Button package = DarkTheme.Button("Archive to SURF…", ActionIcon.Archive, primary: true);
+    private readonly Button resume = DarkTheme.Button("Resume archive upload…", ActionIcon.Recovery);
     private readonly ToolTip help = new();
-    private readonly Button removeWindows = DarkTheme.Button("Remove…");
-    private readonly Button removeSurf = DarkTheme.Button("Remove…");
-    private readonly Button newFolder = DarkTheme.Button("+ New folder");
+    private readonly Button removeWindows = DarkTheme.Button("Remove…", ActionIcon.Trash);
+    private readonly Button removeSurf = DarkTheme.Button("Remove…", ActionIcon.Trash);
+    private readonly Button newFolder = DarkTheme.Button("New folder", ActionIcon.FolderPlus);
     private readonly Label connection = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
     private readonly Label feedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private ArchiveSession? archive;
     private CancellationTokenSource? operation;
+    private CancellationTokenSource? archiveOperation;
     private CancellationTokenSource? statusLookup;
     private readonly Dictionary<string, RestoreActivity> restores = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim retentionEditor = new(1);
     private bool transferring;
     private bool closeWhenIdle;
+    private bool confirmingClose;
 
     public MainWindow(ArchiveSession? session)
     {
@@ -31,7 +36,7 @@ internal sealed class MainWindow : Form
         DarkTheme.Window(this);
         Text = "SurfDataArchiveTransfer";
         MinimumSize = new Size(1040, 660);
-        ClientSize = new Size(1410, 810);
+        ClientSize = new Size(1410, 850);
         StartPosition = FormStartPosition.CenterScreen;
         BuildLayout();
         help.SetToolTip(resume, "Continue an interrupted upload from a local recovery folder containing package.json.");
@@ -63,11 +68,22 @@ internal sealed class MainWindow : Form
         resume.Click += async (_, _) => await ResumeArchive();
         removeWindows.Click += async (_, _) => await ConfirmRemoval(local: true);
         removeSurf.Click += async (_, _) => await ConfirmRemoval(local: false);
-        removeWindows.AccessibleName = "Remove selected Windows items";
+        removeWindows.AccessibleName = "Remove selected Local / NAS items";
         removeSurf.AccessibleName = "Remove selected SURF items";
         newFolder.Click += async (_, _) => await Run(MakeFolder);
         transfers.CancelRequested += CancelSelectedActivity;
         transfers.SelectionChanged += UpdateControls;
+        archiveQueue.Changed += () =>
+        {
+            queuePanel.ShowItems(archiveQueue.Items);
+            queueHeight.Height = ArchiveQueuePanel.HeightFor(archiveQueue.Items.Count) * DeviceDpi / 96f;
+        };
+        queuePanel.TogglePause += item =>
+        {
+            archiveQueue.TogglePause(item);
+            TryStartNextArchive();
+        };
+        queuePanel.RemoveItem += archiveQueue.Remove;
         Shown += async (_, _) => await Run(InitialLoad);
         FormClosing += OnClosing;
         FormClosed += (_, _) =>
@@ -82,9 +98,12 @@ internal sealed class MainWindow : Form
 
     private void BuildLayout()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
-        foreach (int height in new[] { 46, -1, 43, 246, 25 })
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty };
+        foreach (int height in new[] { 38, -1, 35 })
             layout.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+        layout.RowStyles.Add(queueHeight);
+        layout.RowStyles.Add(new(SizeType.Absolute, 205));
+        layout.RowStyles.Add(new(SizeType.Absolute, 25));
         Controls.Add(layout);
 
         var header = new TableLayoutPanel
@@ -96,7 +115,7 @@ internal sealed class MainWindow : Form
         header.ColumnStyles.Add(new(SizeType.AutoSize));
         header.ColumnStyles.Add(new(SizeType.AutoSize));
         header.Controls.Add(DarkTheme.Row(resume), 0, 0);
-        connection.Margin = new Padding(0, 7, 17, 0);
+        connection.Margin = new Padding(0, 5, 17, 0);
         header.Controls.Add(connection, 1, 0);
         header.Controls.Add(signIn, 2, 0);
         layout.Controls.Add(header, 0, 0);
@@ -118,13 +137,15 @@ internal sealed class MainWindow : Form
         actions.Controls.Add(DarkTheme.Row(download, restore, newFolder, removeSurf), 1, 0);
         layout.Controls.Add(actions, 0, 2);
 
+        queuePanel.Margin = new Padding(13, 0, 13, 4);
+        layout.Controls.Add(queuePanel, 0, 3);
         transfers.Margin = new Padding(13, 0, 13, 0);
-        layout.Controls.Add(transfers, 0, 3);
+        layout.Controls.Add(transfers, 0, 4);
         feedback.AutoSize = false;
         feedback.AutoEllipsis = true;
         feedback.Dock = DockStyle.Fill;
         feedback.Margin = new Padding(14, 4, 14, 0);
-        layout.Controls.Add(feedback, 0, 4);
+        layout.Controls.Add(feedback, 0, 5);
     }
 
     private async Task InitialLoad(CancellationToken token)
@@ -200,7 +221,7 @@ internal sealed class MainWindow : Form
             root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder.RootPath));
             string relative = Path.GetRelativePath(root, Path.GetFullPath(folder.Path));
             if (Path.IsPathRooted(relative) || relative == ".." || relative.StartsWith("..\\", StringComparison.Ordinal))
-                throw new IOException("The recent folder is outside its Windows location.");
+                throw new IOException("The recent folder is outside its Local / NAS location.");
             parts = relative == "." ? [] : relative.Split('\\', '/');
         }
 
@@ -298,6 +319,9 @@ internal sealed class MainWindow : Form
     {
         if (archive is not null)
         {
+            if (!ConfirmDiscardQueue("Signing out"))
+                return;
+            archiveQueue.ClearPending();
             StopStatusLookup();
             StopRestores();
             var currentArchive = archive;
@@ -470,7 +494,7 @@ internal sealed class MainWindow : Form
             if (existing.Polling.RequestPreview())
             {
                 existing.Job.Direction = previewAction;
-                existing.Job.Notes[1] = "Destination: Temporary Windows preview";
+                existing.Job.Notes[1] = "Destination: Temporary local preview";
                 transfers.Log("Will open automatically when the file is on disk. Checking every 15 seconds.", existing.Job);
             }
             SetFeedback($"Will open {item.Name} when it is ready.");
@@ -478,7 +502,7 @@ internal sealed class MainWindow : Form
             return;
         }
 
-        string target = openWhenReady ? "Temporary Windows preview" : "SURF disk";
+        string target = openWhenReady ? "Temporary local preview" : "SURF disk";
         string action = openWhenReady ? previewAction : item.IsDirectory ? "Restore folder" : "Tape restore";
         var job = new TransferJob(item.Name, action, path, target, item.IsDirectory ? 0 : item.Size, tape: true);
         var activity = new RestoreActivity(job, new RestorePolling(), new CancellationTokenSource());
@@ -597,7 +621,7 @@ internal sealed class MainWindow : Form
             }
             else
             {
-                transfers.Log("Ready. Select the file and click Download when you want to copy it to Windows.", job);
+                transfers.Log("Ready. Select the file and click Download to copy it to the current Local / NAS folder.", job);
                 transfers.Finish(job, TransferState.Ready);
             }
         }
@@ -767,52 +791,112 @@ internal sealed class MainWindow : Form
 
     private async Task ArchiveSelected()
     {
+        if (operation is not null || archive is null || !surf.HasFolder || closeWhenIdle)
+            return;
         var selection = windows.SelectedItems;
         string source = windows.PathShown;
         string destination = surf.PathShown;
         if (!ArchivePackage.CanArchive(selection))
             return;
-        string? filesFolderName = null;
-        if (!selection[0].IsDirectory)
-        {
-            filesFolderName = PackageDialog.AskFolderName(this);
-            if (filesFolderName is null)
-                return;
-        }
-
         await Run(async token =>
         {
+            string? filesFolderName = null;
+            if (!selection[0].IsDirectory)
+            {
+                filesFolderName = PackageDialog.AskFolderName(this);
+                if (filesFolderName is null)
+                    return;
+            }
             SetFeedback("Scanning selected data and checking staging space…");
             var requests = await Task.Run(() => ArchivePackage.PlanSelection(source, destination, selection, filesFolderName, token));
-            await Task.Run(() => archive!.CheckArchiveDestinations(requests, token));
+            archiveQueue.CheckDestinations(requests);
+            var existing = surf.SnapshotEntries().Select(entry => entry.Name).ToHashSet(StringComparer.Ordinal);
+            foreach (var request in requests)
+            {
+                if (existing.Contains(request.Name))
+                    throw new IOException($"The SURF destination already exists at {request.RemotePath}. Choose a different parent folder or name.");
+            }
             var options = PackageDialog.Confirm(this, requests);
             if (options is null)
             {
                 SetFeedback("");
                 return;
             }
-            foreach (var planned in requests)
+            token.ThrowIfCancellationRequested();
+            archiveQueue.Add(requests, options);
+            SetFeedback(requests.Count == 1 ? "Archive added to the queue." : $"{requests.Count:N0} archives added to the queue.");
+        });
+    }
+
+    private void TryStartNextArchive()
+    {
+        if (archiveOperation is not null || operation is not null || archive is null || closeWhenIdle || confirmingClose)
+            return;
+        if (archiveQueue.StartNext() is { } item)
+            _ = RunQueuedArchive(item);
+    }
+
+    private async Task RunQueuedArchive(ArchiveQueueItem item)
+    {
+        using var cancellation = new CancellationTokenSource();
+        archiveOperation = cancellation;
+        var token = cancellation.Token;
+        UpdateControls();
+        var request = item.Request;
+        var options = item.Options with
+        {
+            Retention = item.Options.Retention with { ArchivedOn = DateOnly.FromDateTime(DateTime.Today) }
+        };
+        try
+        {
+            if (options.LocalStagingFolder is { } local)
             {
-                token.ThrowIfCancellationRequested();
-                var request = planned;
-                if (options.LocalStagingFolder is { } local)
-                {
-                    var plan = await Task.Run(() => planned.Plan.WithPreferredStaging(local,
-                        PackageFiles.LocalStagingFreeBytes(local)), token);
-                    request = planned with { Plan = plan };
-                    if (plan.UsesFallback)
-                        transfers.Log($"Local staging has too little free space for {request.Name}. Using {request.LocalPath}.");
-                }
-                await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
-                    ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
-                        target, options, progress, token), token);
+                var plan = await Task.Run(() => item.Request.Plan.WithPreferredStaging(local,
+                    PackageFiles.LocalStagingFreeBytes(local)), token);
+                request = request with { Plan = plan };
+                if (plan.UsesFallback)
+                    transfers.Log($"Local staging has too little free space for {request.Name}. Using {request.LocalPath}.");
             }
-            await NavigateLocal(source, null);
-            await NavigateRemote(destination, null);
-            SetFeedback(options.RemoveOriginals
-                ? "Archives uploaded and verified. Originals and local archive parts removed."
-                : "Archives uploaded and verified. Originals kept.");
-        }, transfer: true);
+            await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
+                ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
+                    target, options, progress, token), token);
+            transfers.Log($"{request.Name} was uploaded and verified.");
+            if (operation is null && !closeWhenIdle &&
+                !archiveQueue.Items.Any(queued => queued.State == ArchiveQueueState.Queued))
+            {
+                bool refreshLocal = windows.PathShown.Equals(request.Plan.Source, StringComparison.OrdinalIgnoreCase);
+                bool refreshSurf = surf.PathShown == request.Parent;
+                if (refreshLocal || refreshSurf)
+                {
+                    await Run(async _ =>
+                    {
+                        if (refreshLocal)
+                            await NavigateLocal(request.Plan.Source, null);
+                        if (refreshSurf)
+                            await NavigateRemote(request.Parent, null);
+                    });
+                }
+                SetFeedback($"{request.Name} was uploaded and verified.");
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            transfers.Log($"{request.Name} was cancelled.");
+            if (operation is null)
+                SetFeedback("Archive cancelled.");
+        }
+        catch (Exception error)
+        {
+            transfers.Log($"{request.Name} failed. {error.Message}");
+            if (operation is null)
+                SetFeedback(error.Message, error: true);
+        }
+        finally
+        {
+            archiveQueue.Finish(item);
+            archiveOperation = null;
+            FinishWork();
+        }
     }
 
     private async Task ResumeArchive()
@@ -852,7 +936,8 @@ internal sealed class MainWindow : Form
     {
         var stages = new Dictionary<PackageStep, TransferJob>();
         var gate = new object();
-        SetFeedback("Preparing archive destination…");
+        if (operation is null || transferring)
+            SetFeedback("Preparing archive destination…");
         try
         {
             await Task.Run(async () =>
@@ -941,7 +1026,7 @@ internal sealed class MainWindow : Form
                     else
                         await Task.Run(() => archive!.Remove(directory, item));
                     removed++;
-                    transfers.Log($"Removed from {(local ? "Windows" : "SURF")}: {item.Name}");
+                    transfers.Log($"Removed from {(local ? "Local / NAS" : "SURF")}: {item.Name}");
                 }
                 catch (Exception error)
                 {
@@ -972,8 +1057,8 @@ internal sealed class MainWindow : Form
         var name = DarkTheme.Input("Folder name");
         name.PlaceholderText = "Folder name";
         name.Dock = DockStyle.Top;
-        var create = DarkTheme.Button("Create", primary: true);
-        var cancel = DarkTheme.Button("Cancel");
+        var create = DarkTheme.Button("Create", ActionIcon.FolderPlus, primary: true);
+        var cancel = DarkTheme.Button("Cancel", ActionIcon.Cancel);
         create.DialogResult = DialogResult.OK;
         cancel.DialogResult = DialogResult.Cancel;
         var actions = DarkTheme.Row(cancel, create);
@@ -1020,9 +1105,7 @@ internal sealed class MainWindow : Form
         {
             operation = null;
             transferring = false;
-            UpdateControls();
-            if (closeWhenIdle)
-                BeginInvoke(Close);
+            FinishWork();
         }
     }
 
@@ -1043,51 +1126,92 @@ internal sealed class MainWindow : Form
 
     private void CancelTransfer()
     {
-        if (operation is null || !transferring)
+        var active = archiveOperation ?? (transferring ? operation : null);
+        if (active is null)
             return;
-        operation.Cancel();
+        active.Cancel();
         UpdateControls();
         SetFeedback("Cancelling activity…");
     }
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
+        if (confirmingClose)
+        {
+            e.Cancel = true;
+            return;
+        }
+        if (!closeWhenIdle)
+        {
+            confirmingClose = true;
+            bool discard;
+            try { discard = ConfirmDiscardQueue("Closing SurfDataArchiveTransfer"); }
+            finally { confirmingClose = false; }
+            if (!discard)
+            {
+                e.Cancel = true;
+                TryStartNextArchive();
+                return;
+            }
+        }
+        closeWhenIdle = true;
+        archiveQueue.ClearPending();
         StopRestores();
-        if (operation is null)
+        if (operation is null && archiveOperation is null)
             return;
         e.Cancel = true;
-        closeWhenIdle = true;
-        CancelTransfer();
+        operation?.Cancel();
+        archiveOperation?.Cancel();
+        UpdateControls();
+    }
+
+    private bool ConfirmDiscardQueue(string action) => archiveQueue.PendingCount == 0 ||
+        MessageBox.Show(this, $"{action} will clear all waiting and paused queue entries. These entries have not started.",
+            "Clear archive queue?", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.OK;
+
+    private void FinishWork()
+    {
+        UpdateControls();
+        if (closeWhenIdle)
+        {
+            if (operation is null && archiveOperation is null)
+                BeginInvoke(Close);
+            return;
+        }
+        TryStartNextArchive();
     }
 
     private void UpdateControls()
     {
-        bool idle = operation is null;
+        bool idle = operation is null && !closeWhenIdle;
+        bool transferIdle = idle && archiveOperation is null;
         bool online = archive is not null;
         signIn.Text = online ? "Sign out" : "Sign in";
-        signIn.Enabled = idle;
+        DarkTheme.SetIcon(signIn, online ? ActionIcon.SignOut : ActionIcon.SignIn);
+        signIn.Enabled = transferIdle;
         connection.Text = online ? "●  SFTP connected  ·  " + ArchiveSession.Host : "Disconnected";
         connection.ForeColor = online ? DarkTheme.Mint : DarkTheme.Muted;
         windows.SetAvailable(idle, windows.HasFolder);
         surf.SetAvailable(idle, online && surf.HasFolder);
         var localSelection = windows.SelectedItems;
-        upload.Enabled = idle && online && surf.HasFolder && LocalFiles.CanUploadDirectly(localSelection);
+        upload.Enabled = transferIdle && online && surf.HasFolder && LocalFiles.CanUploadDirectly(localSelection);
         var selected = surf.SelectedItems;
-        download.Enabled = idle && online && windows.HasFolder && selected.Count > 0 &&
+        download.Enabled = transferIdle && online && windows.HasFolder && selected.Count > 0 &&
             selected.All(item => item.IsDirectory ? item.HasSubfolders != true : ArchiveStatus.IsOnDisk(item.Status));
         restore.Enabled = idle && online && selected.Any(item =>
             (item.IsDirectory ? item.HasSubfolders != true && !ArchiveStatus.IsOnDisk(item.Status) : ArchiveStatus.CanRestore(item.Status))
             && !restores.ContainsKey(ArchiveSession.Child(surf.PathShown, item.Name)));
         package.Enabled = idle && online && surf.HasFolder && ArchivePackage.CanArchive(localSelection);
-        resume.Enabled = idle && online;
-        removeWindows.Enabled = idle && windows.SelectedItems.Count > 0;
-        removeSurf.Enabled = idle && online && surf.SelectedItems.Count > 0;
-        newFolder.Enabled = idle && surf.HasFolder;
+        resume.Enabled = transferIdle && online;
+        removeWindows.Enabled = transferIdle && windows.SelectedItems.Count > 0;
+        removeSurf.Enabled = transferIdle && online && surf.SelectedItems.Count > 0;
+        newFolder.Enabled = transferIdle && online && surf.HasFolder;
         var selectedRestore = SelectedRestore;
         string cancelCaption = selectedRestore is null ? "Cancel activity"
             : selectedRestore.Polling.OpenWhenReady ? "Cancel preview" : "Stop monitoring";
         transfers.SetCancel(cancelCaption,
-            selectedRestore is not null || (transferring && operation is { IsCancellationRequested: false }));
+            !closeWhenIdle && (selectedRestore is not null || archiveOperation is { IsCancellationRequested: false }
+                || (transferring && operation is { IsCancellationRequested: false })));
     }
 
     private void SetFeedback(string text, bool error = false)

@@ -165,7 +165,7 @@ internal sealed class TransferLog : UserControl
     };
     private readonly Label summary = DarkTheme.Label("No activity yet", DarkTheme.Small, DarkTheme.Muted);
     private readonly TextBox details = DarkTheme.Input("Transfer details and archive status");
-    private readonly Button cancel = DarkTheme.Button("Cancel transfer");
+    private readonly Button cancel = DarkTheme.Button("Cancel activity", ActionIcon.Cancel);
     private readonly List<string> activity = [];
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 300 };
     private readonly Dictionary<TransferJob, DataGridViewRow> activeRows = [];
@@ -176,7 +176,7 @@ internal sealed class TransferLog : UserControl
         BackColor = DarkTheme.Panel;
         Padding = new Padding(12, 8, 12, 8);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Margin = Padding.Empty };
-        layout.RowStyles.Add(new(SizeType.Absolute, 36));
+        layout.RowStyles.Add(new(SizeType.Absolute, 32));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
         layout.RowStyles.Add(new(SizeType.Absolute, 61));
         Controls.Add(layout);
@@ -200,7 +200,7 @@ internal sealed class TransferLog : UserControl
         details.Margin = new Padding(0, 5, 0, 0);
         DarkTheme.Explorer(details);
 
-        jobs.RowTemplate.Height = 29;
+        jobs.RowTemplate.Height = 26;
         jobs.DefaultCellStyle = new DataGridViewCellStyle
         {
             BackColor = DarkTheme.Panel, ForeColor = DarkTheme.Ink,

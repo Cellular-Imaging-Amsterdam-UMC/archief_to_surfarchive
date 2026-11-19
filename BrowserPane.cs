@@ -18,9 +18,9 @@ internal sealed class BrowserPane : UserControl
     };
     private readonly TextBox address = DarkTheme.Input("Current folder");
     private readonly TextBox filter = DarkTheme.Input("Filter folder contents");
-    private readonly Button up = DarkTheme.Button("↑ Up");
-    private readonly Button reload = DarkTheme.Button("⟳ Refresh");
-    private readonly Button recent = DarkTheme.Button("Recent ▾");
+    private readonly Button up = DarkTheme.Button("Up", ActionIcon.Up);
+    private readonly Button reload = DarkTheme.Button("Refresh", ActionIcon.Refresh);
+    private readonly Button recent = DarkTheme.Button("Recent", ActionIcon.History);
     private readonly ContextMenuStrip recentMenu = new()
     {
         BackColor = DarkTheme.Panel, ForeColor = DarkTheme.Ink, Font = DarkTheme.Small,
@@ -43,7 +43,7 @@ internal sealed class BrowserPane : UserControl
     public BrowserPane(string heading, bool local)
     {
         this.local = local;
-        storage = DarkTheme.Label(local ? "Windows file system" : "Personal archive", DarkTheme.Small, DarkTheme.Muted);
+        storage = DarkTheme.Label("Personal archive", DarkTheme.Small, DarkTheme.Muted);
         Dock = DockStyle.Fill;
         BackColor = DarkTheme.Panel;
         Padding = new Padding(12);
@@ -51,7 +51,7 @@ internal sealed class BrowserPane : UserControl
         AccessibleName = heading;
 
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
-        foreach (int height in new[] { 29, 37, 30, -1, 22 })
+        foreach (int height in new[] { 27, 32, 28, -1, 22 })
             panel.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
         Controls.Add(panel);
         panel.Controls.Add(DarkTheme.Label(heading, DarkTheme.Heading), 0, 0);
@@ -59,7 +59,7 @@ internal sealed class BrowserPane : UserControl
         locations.BackColor = DarkTheme.Raised;
         locations.ForeColor = DarkTheme.Ink;
         locations.Margin = new Padding(0, 3, 9, 0);
-        locations.AccessibleName = "Windows location";
+        locations.AccessibleName = "Local / NAS location";
         DarkTheme.Explorer(locations, "DarkMode_CFD");
         locations.DrawItem += (_, e) =>
         {
@@ -310,6 +310,9 @@ internal sealed class BrowserPane : UserControl
     public void ShowFolder(string path, string? rootLabel, List<ArchiveEntry> content,
         IReadOnlyList<FolderListing>? ancestors = null)
     {
+        var comparison = local ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        bool refreshing = rootLabel is null && path.Equals(PathShown, comparison);
+        var selected = refreshing ? SelectedItems.Select(item => item.Name).ToHashSet(StringComparer.Ordinal) : null;
         updating = true;
         folders.BeginUpdate();
         try
@@ -344,8 +347,14 @@ internal sealed class BrowserPane : UserControl
             PathShown = path;
             address.Text = path;
             entries = content;
-            filter.Clear();
+            if (!refreshing)
+                filter.Clear();
             RenderFiles();
+            if (selected is { Count: > 0 })
+            {
+                foreach (ListViewItem row in files.Items)
+                    row.Selected = row.Tag is ArchiveEntry entry && selected.Contains(entry.Name);
+            }
             if (folders.Nodes[0].Tag is string root)
                 history?.Use(new(path, root, folders.Nodes[0].Text));
         }

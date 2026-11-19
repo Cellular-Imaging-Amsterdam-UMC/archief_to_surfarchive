@@ -562,17 +562,6 @@ internal sealed class ArchiveSession : IDisposable
 
     public PackageDestination PackageTarget() => new(this);
 
-    public void CheckArchiveDestinations(IReadOnlyList<ArchiveRequest> requests, CancellationToken token)
-    {
-        Reconnect();
-        foreach (var request in requests)
-        {
-            token.ThrowIfCancellationRequested();
-            if (sftp.Exists(request.RemotePath))
-                throw new IOException($"The SURF destination already exists: {request.RemotePath}. Choose a different parent folder or name.");
-        }
-    }
-
     internal sealed class PackageDestination(ArchiveSession session) : IPackageDestination, IDisposable
     {
         private SftpClient? uploadClient;

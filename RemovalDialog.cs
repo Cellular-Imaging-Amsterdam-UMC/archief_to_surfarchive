@@ -6,7 +6,7 @@ internal static class RemovalDialog
     {
         using var dialog = new Form
         {
-            Text = local ? "Remove from Windows" : "Remove from SURF Data Archive",
+            Text = local ? "Remove from Local / NAS" : "Remove from SURF Data Archive",
             ClientSize = new Size(555, 324), FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false,
             ShowInTaskbar = false
@@ -46,10 +46,10 @@ internal static class RemovalDialog
         DarkTheme.Explorer(names);
         layout.Controls.Add(names, 0, 3);
 
-        var remove = DarkTheme.Button("Remove permanently");
+        var remove = DarkTheme.Button("Remove permanently", ActionIcon.Trash);
         remove.ForeColor = DarkTheme.Error;
         remove.DialogResult = DialogResult.OK;
-        var cancel = DarkTheme.Button("Cancel", primary: true);
+        var cancel = DarkTheme.Button("Cancel", ActionIcon.Cancel, primary: true);
         cancel.DialogResult = DialogResult.Cancel;
         var buttons = DarkTheme.Row(remove, cancel);
         buttons.Margin = new Padding(0, 7, 0, 0);

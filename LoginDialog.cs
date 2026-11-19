@@ -8,8 +8,8 @@ internal sealed class LoginDialog : Form
     private readonly TextBox password = DarkTheme.Input("SURF password");
     private readonly CheckBox remember = new() { Text = "Remember username", AutoSize = true };
     private readonly Label feedback = DarkTheme.Label("archive.surf.nl  ·  SFTP", DarkTheme.Small, DarkTheme.Muted);
-    private readonly Button signIn = DarkTheme.Button("Sign in", primary: true);
-    private readonly Button cancel = DarkTheme.Button("Cancel");
+    private readonly Button signIn = DarkTheme.Button("Sign in", ActionIcon.SignIn, primary: true);
+    private readonly Button cancel = DarkTheme.Button("Cancel", ActionIcon.Cancel);
     private ArchiveSession? session;
     private bool connecting;
     private string? settingsError;

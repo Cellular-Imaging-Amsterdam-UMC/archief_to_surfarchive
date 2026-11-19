@@ -52,8 +52,21 @@ internal static class DarkTheme
         Margin = Padding.Empty
     };
 
-    public static Button Button(string text, bool primary = false) =>
-        new DarkButton(primary) { Text = text };
+    public static Button Button(string text, ActionIcon icon, bool primary = false) =>
+        new DarkButton(icon, primary) { Text = text };
+
+    public static Button IconButton(ActionIcon icon, string name) =>
+        new DarkButton(icon, false)
+        {
+            AccessibleName = name, AutoSize = false, MinimumSize = Size.Empty, Size = new Size(26, 25),
+            Padding = Padding.Empty, Margin = new Padding(1, 1, 2, 1), ImageAlign = ContentAlignment.MiddleCenter
+        };
+
+    public static void SetIcon(Button button, ActionIcon icon)
+    {
+        if (button is DarkButton styled)
+            styled.SetIcon(icon);
+    }
 
     public static FlowLayoutPanel Row(params Control[] controls)
     {
@@ -87,19 +100,40 @@ internal static class DarkTheme
     {
         private readonly bool primary;
         private bool hovered;
+        private ActionIcon icon;
 
-        public DarkButton(bool primary)
+        public DarkButton(ActionIcon icon, bool primary)
         {
+            this.icon = icon;
             this.primary = primary;
             AutoSize = true;
-            MinimumSize = new Size(0, 31);
-            Padding = new Padding(10, 1, 10, 1);
-            Margin = new Padding(0, 0, 7, 0);
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            MinimumSize = new Size(0, 26);
+            Padding = new Padding(7, 0, 7, 0);
+            Margin = new Padding(0, 0, 6, 0);
+            ImageAlign = ContentAlignment.MiddleLeft;
+            TextImageRelation = TextImageRelation.ImageBeforeText;
             FlatStyle = FlatStyle.Flat;
             UseVisualStyleBackColor = false;
             FlatAppearance.BorderSize = 1;
             Apply();
         }
+
+        public override Size GetPreferredSize(Size proposedSize)
+        {
+            var size = base.GetPreferredSize(proposedSize);
+            return AutoSize ? new Size(size.Width, DeviceDpi * 26 / 96) : size;
+        }
+
+        public void SetIcon(ActionIcon value)
+        {
+            if (icon == value)
+                return;
+            icon = value;
+            UpdateImage();
+        }
+
+        private void UpdateImage() => Image = ActionIcons.Get(icon, ForeColor, DeviceDpi * 16 / 96);
 
         private void Apply()
         {
@@ -107,6 +141,7 @@ internal static class DarkTheme
             ForeColor = Enabled ? (primary ? Page : Ink) : Muted;
             FlatAppearance.BorderColor = Enabled && primary ? Mint : Border;
             FlatAppearance.MouseOverBackColor = primary ? Color.FromArgb(152, 243, 218) : Border;
+            UpdateImage();
         }
 
         protected override void OnEnabledChanged(EventArgs e)
@@ -125,8 +160,30 @@ internal static class DarkTheme
             e.Graphics.Clear(Raised);
             using var border = new Pen(Border);
             e.Graphics.DrawRectangle(border, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
-            TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, Muted,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            var bitmap = Image!;
+            const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
+            int textWidth = Text.Length > 0 ? TextRenderer.MeasureText(e.Graphics, Text, Font, Size.Empty, flags).Width : 0;
+            int gap = textWidth > 0 ? 4 : 0;
+            int start = (ClientSize.Width - bitmap.Width - gap - textWidth) / 2;
+            e.Graphics.DrawImageUnscaled(bitmap, start, (ClientSize.Height - bitmap.Height) / 2);
+            if (textWidth > 0)
+            {
+                int textLeft = start + bitmap.Width + gap;
+                TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(textLeft, 0, ClientSize.Width - textLeft,
+                    ClientSize.Height), Muted, flags);
+            }
+        }
+
+        protected override void OnForeColorChanged(EventArgs e)
+        {
+            base.OnForeColorChanged(e);
+            UpdateImage();
+        }
+
+        protected override void OnDpiChangedAfterParent(EventArgs e)
+        {
+            base.OnDpiChangedAfterParent(e);
+            UpdateImage();
         }
 
         protected override void OnMouseEnter(EventArgs e)

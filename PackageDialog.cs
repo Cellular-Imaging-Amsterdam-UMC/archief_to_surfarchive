@@ -21,7 +21,7 @@ internal static class PackageDialog
         Body(8, "For files already on tape, use Restore from tape. Double-click an HTML or TXT file to preview it, or retention.json to edit it.",
             DarkTheme.Muted);
 
-        var next = DarkTheme.Button("Choose recovery folder…", primary: true);
+        var next = DarkTheme.Button("Choose recovery folder…", ActionIcon.Browse, primary: true);
         next.DialogResult = DialogResult.OK;
         var cancel = Cancel();
         layout.Controls.Add(Actions(next, cancel), 0, 9);
@@ -58,7 +58,7 @@ internal static class PackageDialog
         feedback.AutoSize = false;
         feedback.Dock = DockStyle.Fill;
         layout.Controls.Add(feedback, 0, 2);
-        var next = DarkTheme.Button("Continue", primary: true);
+        var next = DarkTheme.Button("Continue", ActionIcon.Check, primary: true);
         var cancel = Cancel();
         layout.Controls.Add(Actions(next, cancel), 0, 3);
         dialog.AcceptButton = next;
@@ -88,7 +88,7 @@ internal static class PackageDialog
         using var dialog = CreateDialog("Archive to SURF Data Archive", new Size(764, 735));
         var layout = Layout([31, 54, 28, 38, 24, 29, 35, 46, -1, 29, 150, 42, 40]);
         dialog.Controls.Add(layout);
-        layout.Controls.Add(DarkTheme.Label("Archive selected data to SURF?", DarkTheme.Heading), 0, 0);
+        layout.Controls.Add(DarkTheme.Label("Add selected archives to the queue?", DarkTheme.Heading), 0, 0);
         var explanation = DarkTheme.Label(
             "Create a ZIP in numbered parts of up to 200 MB. Finished parts upload while packing continues. " +
             "The archive includes contents files and retention.json. Open the .zip.001 file in 7-Zip to extract it. " +
@@ -124,7 +124,7 @@ internal static class PackageDialog
         stagingPath.Text = preference.Folder;
         stagingPath.ReadOnly = true;
         stagingPath.Dock = DockStyle.Top;
-        var browse = DarkTheme.Button("Browse…");
+        var browse = DarkTheme.Button("Browse…", ActionIcon.Browse);
         var location = new TableLayoutPanel { ColumnCount = 2, Dock = DockStyle.Fill, Margin = Padding.Empty };
         location.ColumnStyles.Add(new(SizeType.Percent, 100));
         location.ColumnStyles.Add(new(SizeType.AutoSize));
@@ -150,7 +150,7 @@ internal static class PackageDialog
         var feedback = StatusLabel("The retention file records your intended minimum storage period. It does not change SURF's storage settings.");
         layout.Controls.Add(feedback, 0, 11);
 
-        var confirm = DarkTheme.Button("Archive and remove originals");
+        var confirm = DarkTheme.Button("Queue archive", ActionIcon.Archive);
         var cancel = Cancel();
         var actions = Actions(confirm, cancel);
         actions.Margin = new Padding(0, 7, 0, 0);
@@ -202,7 +202,7 @@ internal static class PackageDialog
                 if (selected.Save())
                     preference = selected;
                 else
-                    stagingInfo.Text += " Windows could not remember the staging preference.";
+                    stagingInfo.Text += " The app could not save the staging preference.";
             }
             return true;
         }
@@ -258,9 +258,9 @@ internal static class PackageDialog
         {
             warning.Text = remove.Checked
                 ? "The originals will be permanently removed. This is the recommended setting for moving data to the archive."
-                : "Warning: the originals stay on Windows and no source space is freed. Leave removal on for a normal archive move.";
+                : "The originals stay in the source folder and continue to use space there.";
             warning.ForeColor = remove.Checked ? DarkTheme.Error : DarkTheme.Amber;
-            confirm.Text = remove.Checked ? "Archive and remove originals" : "Archive and keep originals";
+            confirm.Text = remove.Checked ? "Queue archive and remove originals" : "Queue archive and keep originals";
             confirm.ForeColor = remove.Checked ? DarkTheme.Error : DarkTheme.Ink;
         }
     }
@@ -279,7 +279,7 @@ internal static class PackageDialog
         layout.Controls.Add(fields, 0, 3);
         var feedback = StatusLabel("Save updates retention.json on SURF.");
         layout.Controls.Add(feedback, 0, 4);
-        var confirm = DarkTheme.Button("Save to SURF", primary: true);
+        var confirm = DarkTheme.Button("Save to SURF", ActionIcon.Save, primary: true);
         var cancel = Cancel();
         layout.Controls.Add(Actions(confirm, cancel), 0, 5);
         dialog.CancelButton = cancel;
@@ -355,7 +355,7 @@ internal static class PackageDialog
 
     private static Button Cancel()
     {
-        var cancel = DarkTheme.Button("Cancel");
+        var cancel = DarkTheme.Button("Cancel", ActionIcon.Cancel);
         cancel.DialogResult = DialogResult.Cancel;
         return cancel;
     }

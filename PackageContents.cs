@@ -164,7 +164,7 @@ internal static class PackageContents
         html.WriteLine($$"""
             <section class="card restore"><h2>Extract with 7-Zip on Windows</h2>
             <ol>
-              <li>Download the SURF folder so all <strong>{{volumes.Length:N0}} ZIP parts</strong> are together in one Windows folder. Keep the original filenames.</li>
+              <li>Download the SURF folder so all <strong>{{volumes.Length:N0}} ZIP parts</strong> are together in the same destination folder. Keep the original filenames.</li>
               <li>Right-click <code>{{Escape(volumes[0].Name)}}</code> and choose <strong>7-Zip → Extract files…</strong>. On Windows 11, use <strong>Show more options</strong> if needed. You can also select the first part in 7-Zip File Manager and click <strong>Extract</strong>.</li>
               <li>Choose the destination folder and click <strong>OK</strong>. 7-Zip reads the remaining numbered parts automatically.</li>
             </ol>
