@@ -1,8 +1,9 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
-using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.Channels;
 using Microsoft.Win32.SafeHandles;
 
 namespace SurfArchive;
@@ -41,38 +42,8 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         if (roots.Count == 0)
             throw new IOException("Select at least one file or folder.");
 
-        var next = roots.Where(item => item.IsDirectory).ToList();
-        var children = new Dictionary<string, List<PackageEntry>>(StringComparer.Ordinal);
-        var workers = new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = token };
-        while (next.Count > 0)
-        {
-            token.ThrowIfCancellationRequested();
-            var level = next;
-            var listings = new List<PackageEntry>[level.Count];
-            try
-            {
-                Parallel.For(0, level.Count, workers, i =>
-                {
-                    var folder = level[i];
-                    var items = new List<PackageEntry>();
-                    foreach (var metadata in new DirectoryInfo(folder.Path).EnumerateFileSystemInfos("*", ScanEntries))
-                        items.Add(ReadEntry(metadata, folder.Name + metadata.Name, null));
-                    listings[i] = items;
-                });
-            }
-            catch (AggregateException error) when (error.InnerExceptions.Count == 1)
-            {
-                ExceptionDispatchInfo.Throw(error.InnerExceptions[0]);
-            }
-
-            next = [];
-            for (int i = 0; i < level.Count; i++)
-            {
-                token.ThrowIfCancellationRequested();
-                children.Add(level[i].Path, listings[i]);
-                next.AddRange(listings[i].Where(item => item.IsDirectory));
-            }
-        }
+        var children = new ConcurrentDictionary<string, List<PackageEntry>>(StringComparer.Ordinal);
+        ScanFolders();
 
         var entries = new List<PackageEntry>();
         long bytes = 0, overhead = 0;
@@ -88,6 +59,51 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         CheckStagingLocation(source, entries, staging);
         token.ThrowIfCancellationRequested();
         return new(source, entries, bytes, required, staging, fallback);
+
+        void ScanFolders()
+        {
+            var folders = roots.Where(item => item.IsDirectory).ToArray();
+            if (folders.Length == 0)
+                return;
+
+            // Continue down one branch and let other workers take the sibling branches.
+            var work = Channel.CreateUnbounded<PackageEntry>();
+            int pending = folders.Length;
+            foreach (var folder in folders)
+                work.Writer.TryWrite(folder);
+            bool network = Path.GetPathRoot(source) is not { Length: 3 } drive ||
+                new DriveInfo(drive).DriveType == DriveType.Network;
+            var options = new ParallelOptions { MaxDegreeOfParallelism = network ? 32 : 8, CancellationToken = token };
+            Parallel.ForEachAsync(work.Reader.ReadAllAsync(), options, (branch, ct) =>
+            {
+                PackageEntry? next = branch;
+                while (next is { } folder)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    next = null;
+                    var items = new List<PackageEntry>();
+                    foreach (var metadata in new DirectoryInfo(folder.Path).EnumerateFileSystemInfos("*", ScanEntries))
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        var item = ReadEntry(metadata, folder.Name + metadata.Name, null);
+                        items.Add(item);
+                        if (!item.IsDirectory)
+                            continue;
+                        if (next is null)
+                        {
+                            next = item;
+                            continue;
+                        }
+                        Interlocked.Increment(ref pending);
+                        work.Writer.TryWrite(item);
+                    }
+                    children[folder.Path] = items;
+                }
+                if (Interlocked.Decrement(ref pending) == 0)
+                    work.Writer.Complete();
+                return ValueTask.CompletedTask;
+            }).GetAwaiter().GetResult();
+        }
 
         PackageEntry ReadEntry(FileSystemInfo metadata, string name, bool? expectedDirectory)
         {

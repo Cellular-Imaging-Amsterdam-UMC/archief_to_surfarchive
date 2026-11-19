@@ -4,7 +4,7 @@ Windows x64 file manager for SURF Data Archive. Browse local drives and network 
 
 [Quick start for new users](https://cellular-imaging-amsterdam-umc.github.io/archief_to_surfarchive/)
 
-The Local / NAS pane starts at `L:\`. The location menu also has shortcuts to `L:\basic` and `L:\Archief\active`.
+After sign-in, both panes reopen their last visited folders when available. Otherwise, Local / NAS starts at `L:\` and the SURF pane opens your archive home. The location menu also has shortcuts to `L:\basic` and `L:\Archief\active`.
 
 1. Open **SurfDataArchiveTransfer.exe** and sign in with a SURF Data Archive account. **Remember username** saves the username locally. Enter the password each time you sign in.
 2. **Archive to SURF** is the usual upload action. **Upload to SURF** is available for direct copies only when every selected item is a file strictly larger than 100 MB. It always asks for confirmation. Use **Recent** in either pane to reopen a visited folder. You can also enter a folder or UNC path in the Local / NAS path field.
@@ -29,6 +29,8 @@ Select only folders or only files in **Local / NAS**. Use **Archive to SURF** to
 The **Queue** above **Activity** saves archive jobs and their settings locally for each SURF account. After sign-in, waiting jobs start automatically in queue order. Paused jobs stay paused until you use the resume icon. The app checks that the source selection still matches what you queued before it starts an archive.
 
 You can keep browsing and use **Archive to SURF** to add another selection while a scan or transfer runs. The bottom status bar shows the most recent active scan, its item count, scanned size and elapsed time. **Cancel scan** becomes available after ten seconds and stops the scan shown there.
+
+The size shown during a scan is the combined size of the files found so far. Deep folder trees can take time to enumerate on a NAS even when their early files are small.
 
 Queue progress advances as archive steps complete. The total running time includes waits while the job is active and stays visible after it finishes, including after an app restart. The queue shows up to four rows before it scrolls.
 

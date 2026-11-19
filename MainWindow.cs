@@ -243,23 +243,25 @@ internal sealed class MainWindow : Form
         string otherScans = archiveScans.Count > 1 ? $"  ·  {archiveScans.Count:N0} scans active" : "";
         feedback.ForeColor = DarkTheme.Mint;
         feedback.Text = $"{label} ({name})  ·  {files + folders:N0} items ({files:N0} files, {folders:N0} folders)" +
-            $"  ·  {TransferJob.FormatBytes(bytes)}  ·  {TransferJob.FormatTime(active.Clock.Elapsed)}{otherScans}";
+            $"  ·  {TransferJob.FormatBytes(bytes)} of file data found  ·  {TransferJob.FormatTime(active.Clock.Elapsed)}{otherScans}";
     }
 
     private async Task InitialLoad(CancellationToken token)
     {
         _ = Task.Run(FilePreview.PruneTemporaryFolders, token);
-        var local = LoadDefaultLocal();
+        var local = LoadLocalLocation();
         if (archive is null)
         {
             await local;
             return;
         }
-        await Task.WhenAll(local, NavigateRemote(archive.Root, "My archive"), LoadArchiveQueue(archive.Root, token));
+        await Task.WhenAll(local, LoadSurfLocation(archive.Root), LoadArchiveQueue(archive.Root, token));
     }
 
-    private async Task LoadDefaultLocal()
+    private async Task LoadLocalLocation()
     {
+        if (await TryOpenLastFolder(local: true) || closeWhenIdle)
+            return;
         foreach (var (path, label) in new[]
         {
             (LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive),
@@ -277,6 +279,30 @@ internal sealed class MainWindow : Form
             }
         }
         await NavigateLocal(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Documents");
+    }
+
+    private async Task LoadSurfLocation(string root)
+    {
+        if (!await TryOpenLastFolder(local: false) && !closeWhenIdle)
+            await NavigateRemote(root, "My archive");
+    }
+
+    private async Task<bool> TryOpenLastFolder(bool local)
+    {
+        var pane = local ? windows : surf;
+        if (pane.LastVisited is not { } folder)
+            return false;
+        try
+        {
+            await OpenRecent(folder, local);
+            return pane.HasFolder;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or
+            Renci.SshNet.Common.SshException)
+        {
+            transfers.Log($"Could not reopen {folder.Path}. {error.Message}");
+            return false;
+        }
     }
 
     private async Task NavigateLocal(string path, string? root)
@@ -495,7 +521,7 @@ internal sealed class MainWindow : Form
         archive = login.TakeSession();
         surf.SetHistory(new RecentFolders(archive.Root));
         SetFeedback("");
-        await Task.WhenAll(NavigateRemote(archive.Root, "My archive"), LoadArchiveQueue(archive.Root, token));
+        await Task.WhenAll(LoadSurfLocation(archive.Root), LoadArchiveQueue(archive.Root, token));
     }
 
     private async Task LoadArchiveQueue(string root, CancellationToken token)

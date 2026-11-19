@@ -154,6 +154,7 @@ internal sealed class BrowserPane : UserControl
     public event Action? SelectionChanged;
     public string PathShown { get; private set; } = "";
     public bool HasFolder => Current is not null;
+    public RecentFolder? LastVisited => history?.Items.FirstOrDefault();
     public IReadOnlyList<ArchiveEntry> SelectedItems => files.SelectedItems.Cast<ListViewItem>()
         .Select(item => (ArchiveEntry)item.Tag!).ToArray();
     public ArchiveEntry[] SnapshotEntries() => entries.ToArray();
