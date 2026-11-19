@@ -152,17 +152,7 @@ internal record TransferSnapshot(TransferState State, long Copied, long Total, d
 
 internal sealed class TransferLog : UserControl
 {
-    private readonly DataGridView jobs = new BufferedGrid
-    {
-        Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
-        AllowUserToResizeRows = false, RowHeadersVisible = false, MultiSelect = false,
-        SelectionMode = DataGridViewSelectionMode.FullRowSelect, Font = DarkTheme.Small,
-        BorderStyle = BorderStyle.None, CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
-        GridColor = DarkTheme.Border, BackgroundColor = DarkTheme.Panel, EnableHeadersVisualStyles = false,
-        ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single,
-        ColumnHeadersHeight = 27, ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-        AccessibleName = "Activity"
-    };
+    private readonly ActivityGrid jobs = new() { AccessibleName = "Activity" };
     private readonly Label summary = DarkTheme.Label("No activity yet", DarkTheme.Small, DarkTheme.Muted);
     private readonly TextBox details = DarkTheme.Input("Transfer details and archive status");
     private readonly Button cancel = DarkTheme.Button("Cancel activity", ActionIcon.Cancel);
@@ -200,29 +190,15 @@ internal sealed class TransferLog : UserControl
         details.Margin = new Padding(0, 5, 0, 0);
         DarkTheme.Explorer(details);
 
-        jobs.RowTemplate.Height = 26;
-        jobs.DefaultCellStyle = new DataGridViewCellStyle
-        {
-            BackColor = DarkTheme.Panel, ForeColor = DarkTheme.Ink,
-            SelectionBackColor = DarkTheme.Selected, SelectionForeColor = DarkTheme.Ink,
-            Padding = new Padding(5, 0, 5, 0)
-        };
-        jobs.AlternatingRowsDefaultCellStyle.BackColor = DarkTheme.Page;
-        jobs.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
-        {
-            BackColor = DarkTheme.Raised, ForeColor = DarkTheme.Muted,
-            SelectionBackColor = DarkTheme.Raised, SelectionForeColor = DarkTheme.Muted,
-            Padding = new Padding(5, 0, 5, 0)
-        };
-        AddColumn("File or archive", 210, fill: true);
-        AddColumn("Action", 161);
-        AddColumn("Status", 121);
-        AddColumn("Progress", 131);
-        AddColumn("Processed", 135);
-        AddColumn("Speed", 83);
-        AddColumn("ETA", 68);
-        AddColumn("Copy time", 88);
-        AddColumn("Elapsed", 75);
+        jobs.AddTextColumn("File or archive", 210, fill: true);
+        jobs.AddTextColumn("Action", 161);
+        jobs.AddTextColumn("Status", 121);
+        jobs.AddTextColumn("Progress", 131);
+        jobs.AddTextColumn("Processed", 135);
+        jobs.AddTextColumn("Speed", 83);
+        jobs.AddTextColumn("ETA", 68);
+        jobs.AddTextColumn("Copy time", 88);
+        jobs.AddTextColumn("Elapsed", 75);
         jobs.CellPainting += PaintProgress;
         jobs.SelectionChanged += (_, _) => { ShowDetails(); SelectionChanged?.Invoke(); };
         timer.Tick += (_, _) =>
@@ -301,14 +277,6 @@ internal sealed class TransferLog : UserControl
         _ => $"{jobs.Rows.Count:N0} activities · newest first"
     };
 
-    private void AddColumn(string title, int width, bool fill = false) =>
-        jobs.Columns.Add(new DataGridViewTextBoxColumn
-        {
-            HeaderText = title, Width = width, MinimumWidth = fill ? 130 : 45,
-            AutoSizeMode = fill ? DataGridViewAutoSizeColumnMode.Fill : DataGridViewAutoSizeColumnMode.None,
-            SortMode = DataGridViewColumnSortMode.NotSortable
-        });
-
     private static void UpdateRow(DataGridViewRow row)
     {
         if (row.Tag is not TransferJob job)
@@ -374,15 +342,5 @@ internal sealed class TransferLog : UserControl
         if (disposing)
             timer.Dispose();
         base.Dispose(disposing);
-    }
-
-    private sealed class BufferedGrid : DataGridView
-    {
-        public BufferedGrid()
-        {
-            DoubleBuffered = true;
-            DarkTheme.Explorer(VerticalScrollBar);
-            DarkTheme.Explorer(HorizontalScrollBar);
-        }
     }
 }

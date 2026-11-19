@@ -2,127 +2,131 @@ namespace SurfArchive;
 
 internal sealed class ArchiveQueuePanel : UserControl
 {
-    public const int EmptyHeight = 43;
-    private const int RowHeight = 28;
-    private readonly Panel scroll = new() { Dock = DockStyle.Fill, AutoScroll = true, Margin = Padding.Empty };
-    private readonly TableLayoutPanel rows = new()
-    {
-        Dock = DockStyle.Top, ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty
-    };
+    public const int EmptyHeight = 52;
+    private const int PauseColumn = 3;
+    private const int RemoveColumn = 4;
+    private readonly ActivityGrid jobs = new() { AccessibleName = "Archive queue items" };
     private readonly Label summary = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
-    private readonly ToolTip tips = new();
+    private readonly Button removeFinished = DarkTheme.Button("Remove all finished", ActionIcon.Trash);
 
     public ArchiveQueuePanel()
     {
         AccessibleName = "Archive queue";
         BackColor = DarkTheme.Panel;
         Dock = DockStyle.Fill;
-        Padding = new Padding(12, 4, 12, 4);
+        Padding = new Padding(12, 8, 12, 8);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty };
-        layout.RowStyles.Add(new(SizeType.Absolute, 26));
+        layout.RowStyles.Add(new(SizeType.Absolute, 32));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
-        var heading = DarkTheme.Label("Queue", DarkTheme.Heading);
-        heading.Margin = new Padding(0, 2, 0, 0);
-        summary.Margin = new Padding(12, 5, 0, 0);
-        layout.Controls.Add(DarkTheme.Row(heading, summary), 0, 0);
-        rows.ColumnStyles.Add(new(SizeType.Percent, 100));
-        scroll.Controls.Add(rows);
-        DarkTheme.Explorer(scroll);
-        layout.Controls.Add(scroll, 0, 1);
+        var heading = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        heading.ColumnStyles.Add(new(SizeType.Percent, 100));
+        heading.ColumnStyles.Add(new(SizeType.AutoSize));
+        summary.Margin = new Padding(14, 4, 0, 0);
+        heading.Controls.Add(DarkTheme.Row(DarkTheme.Label("↔", DarkTheme.Heading, DarkTheme.Mint),
+            DarkTheme.Label("  Queue", DarkTheme.Heading), summary), 0, 0);
+        heading.Controls.Add(removeFinished, 1, 0);
+        removeFinished.Click += (_, _) => RemoveFinished?.Invoke();
+        layout.Controls.Add(heading, 0, 0);
+        layout.Controls.Add(jobs, 0, 1);
         Controls.Add(layout);
+
+        jobs.AddTextColumn("Archive", 210, fill: true);
+        jobs.AddTextColumn("SURF destination", 280, fill: true);
+        jobs.AddTextColumn("Status", 121);
+        AddActionColumn();
+        AddActionColumn();
+        jobs.CellMouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
+                InvokeAction(e.RowIndex, e.ColumnIndex);
+        };
+        jobs.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode is Keys.Enter or Keys.Space && jobs.CurrentCell is { } cell &&
+                InvokeAction(cell.RowIndex, cell.ColumnIndex))
+                e.Handled = e.SuppressKeyPress = true;
+        };
         ShowItems([]);
     }
 
     public event Action<ArchiveQueueItem>? TogglePause;
     public event Action<ArchiveQueueItem>? RemoveItem;
+    public event Action? RemoveFinished;
 
-    public static int HeightFor(int count) => count == 0 ? EmptyHeight : 40 + RowHeight * Math.Min(count, 3);
+    public static int HeightFor(int count) => count == 0 ? EmptyHeight
+        : EmptyHeight + ActivityGrid.HeaderHeight + ActivityGrid.ItemHeight * Math.Min(count, 3) + 8;
 
     public void ShowItems(IReadOnlyList<ArchiveQueueItem> items)
     {
-        int queued = items.Count(item => item.State == ArchiveQueueState.Queued);
-        int paused = items.Count(item => item.State == ArchiveQueueState.Paused);
-        summary.Text = items.Count == 0 ? "No archives queued" : string.Join("  ·  ",
-            new[] { queued > 0 ? $"{queued:N0} waiting" : "", paused > 0 ? $"{paused:N0} paused" : "",
-                items.Any(item => item.State == ArchiveQueueState.Running) ? "1 running" : "" }.Where(text => text.Length > 0));
+        var counts = items.GroupBy(item => item.State).ToDictionary(group => group.Key, group => group.Count());
+        summary.Text = items.Count == 0 ? "No archives queued" : string.Join("  ·  ", counts.OrderBy(pair => pair.Key)
+            .Select(pair => $"{pair.Value:N0} {(pair.Key == ArchiveQueueState.Queued ? "waiting" : pair.Key.ToString().ToLowerInvariant())}"));
+        removeFinished.Enabled = counts.ContainsKey(ArchiveQueueState.Finished);
+        jobs.Visible = items.Count > 0;
 
-        int verticalOffset = -scroll.AutoScrollPosition.Y;
-        bool focused = ContainsFocus;
-        var focusedItem = rows.Controls.OfType<Control>().FirstOrDefault(row => row.ContainsFocus)?.Tag as ArchiveQueueItem;
-        rows.SuspendLayout();
-        tips.RemoveAll();
-        while (rows.Controls.Count > 0)
+        string? selectedId = (jobs.CurrentRow?.Tag as ArchiveQueueItem)?.LocalName;
+        int column = jobs.CurrentCell?.ColumnIndex ?? 0;
+        int top = jobs.FirstDisplayedScrollingRowIndex;
+        DataGridViewRow? selection = null;
+        jobs.SuspendLayout();
+        jobs.Rows.Clear();
+        foreach (var item in items)
         {
-            var old = rows.Controls[0];
-            rows.Controls.RemoveAt(0);
-            old.Dispose();
+            var row = jobs.Rows[jobs.Rows.Add(item.Name, item.RemotePath, item.State.ToString())];
+            row.Tag = item;
+            if (item.LocalName == selectedId)
+                selection = row;
+            row.Cells[0].ToolTipText = item.Source;
+            row.Cells[1].ToolTipText = item.RemotePath;
+            row.Cells[2].ToolTipText = string.Join(Environment.NewLine,
+                new[] { item.Detail, item.RecoveryPath is { } path && item.State is ArchiveQueueState.Interrupted
+                    or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled ? $"Local package: {path}" : null }
+                    .OfType<string>());
+            row.Cells[2].Style.ForeColor = item.State switch
+            {
+                ArchiveQueueState.Running or ArchiveQueueState.Finished => DarkTheme.Mint,
+                ArchiveQueueState.Paused or ArchiveQueueState.Interrupted or ArchiveQueueState.Cancelled => DarkTheme.Amber,
+                ArchiveQueueState.Failed => DarkTheme.Error,
+                _ => DarkTheme.Ink
+            };
+            if (item.State == ArchiveQueueState.Queued)
+                SetAction(row, PauseColumn, ActionIcon.Pause, "Pause");
+            if (item.State == ArchiveQueueState.Paused)
+                SetAction(row, PauseColumn, ActionIcon.Play, "Resume");
+            if (item.State != ArchiveQueueState.Running)
+                SetAction(row, RemoveColumn, ActionIcon.Trash, "Remove from queue");
         }
-        rows.RowStyles.Clear();
-        rows.RowCount = items.Count;
-        for (int i = 0; i < items.Count; i++)
-        {
-            rows.RowStyles.Add(new(SizeType.Absolute, RowHeight));
-            rows.Controls.Add(CreateRow(items[i], i), 0, i);
-        }
-        rows.ResumeLayout();
-        scroll.AutoScrollPosition = new Point(0, verticalOffset);
-        if (focused && focusedItem is not null &&
-            rows.Controls.OfType<Control>().FirstOrDefault(row => ReferenceEquals(row.Tag, focusedItem)) is { } retained)
-            retained.SelectNextControl(null, forward: true, tabStopOnly: true, nested: true, wrap: false);
+        jobs.ResumeLayout();
+        if (selection is not null)
+            jobs.CurrentCell = selection.Cells[column];
+        if (top >= 0 && jobs.Rows.Count > 0 && jobs.Visible)
+            jobs.FirstDisplayedScrollingRowIndex = Math.Min(top, jobs.Rows.Count - 1);
     }
 
-    private Control CreateRow(ArchiveQueueItem item, int index)
+    private void AddActionColumn() => jobs.Columns.Add(new DataGridViewImageColumn
     {
-        var active = item.State == ArchiveQueueState.Running;
-        var row = new TableLayoutPanel
-        {
-            Tag = item, AccessibleName = $"{item.Request.Name}, {item.State}",
-            BackColor = active ? DarkTheme.Selected : index % 2 == 0 ? DarkTheme.Page : DarkTheme.Panel,
-            Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, Margin = Padding.Empty, Padding = new Padding(7, 0, 2, 0)
-        };
-        row.ColumnStyles.Add(new(SizeType.Percent, 38));
-        row.ColumnStyles.Add(new(SizeType.Percent, 62));
-        row.ColumnStyles.Add(new(SizeType.Absolute, 86));
-        row.ColumnStyles.Add(new(SizeType.Absolute, 30));
-        row.ColumnStyles.Add(new(SizeType.Absolute, 30));
-        AddText(item.Request.Name, DarkTheme.Ink, 0,
-            $"Source: {item.Request.Plan.Source}\nDestination: {item.Request.RemotePath}");
-        AddText(item.Request.RemotePath, DarkTheme.Muted, 1, item.Request.RemotePath);
-        AddText(item.State.ToString(), active ? DarkTheme.Mint : item.State == ArchiveQueueState.Paused ? DarkTheme.Amber : DarkTheme.Muted, 2);
-        if (!active)
-        {
-            bool paused = item.State == ArchiveQueueState.Paused;
-            AddButton(paused ? ActionIcon.Play : ActionIcon.Pause, paused ? "Resume" : "Pause", 3, () => TogglePause?.Invoke(item));
-            AddButton(ActionIcon.Trash, "Remove from queue", 4, () => RemoveItem?.Invoke(item));
-        }
-        return row;
+        Width = 34,
+        Resizable = DataGridViewTriState.False,
+        DefaultCellStyle = new DataGridViewCellStyle { NullValue = null, Padding = Padding.Empty }
+    });
 
-        void AddText(string text, Color color, int column, string? tooltip = null)
-        {
-            var label = DarkTheme.Label(text, DarkTheme.Small, color);
-            label.AutoSize = false;
-            label.AutoEllipsis = true;
-            label.TextAlign = ContentAlignment.MiddleLeft;
-            label.Margin = new Padding(0, 0, 6, 0);
-            label.Dock = DockStyle.Fill;
-            row.Controls.Add(label, column, 0);
-            if (tooltip is not null)
-                tips.SetToolTip(label, tooltip);
-        }
-
-        void AddButton(ActionIcon icon, string action, int column, Action click)
-        {
-            var button = DarkTheme.IconButton(icon, $"{action} {item.Request.Name}");
-            button.Click += (_, _) => click();
-            tips.SetToolTip(button, button.AccessibleName);
-            row.Controls.Add(button, column, 0);
-        }
+    private static void SetAction(DataGridViewRow row, int column, ActionIcon icon, string label)
+    {
+        var cell = (DataGridViewImageCell)row.Cells[column];
+        cell.Value = ActionIcons.Get(icon, DarkTheme.Ink, 15);
+        cell.Description = label;
+        cell.ToolTipText = label;
     }
 
-    protected override void Dispose(bool disposing)
+    private bool InvokeAction(int row, int column)
     {
-        if (disposing)
-            tips.Dispose();
-        base.Dispose(disposing);
+        if (row < 0 || (column != PauseColumn && column != RemoveColumn) ||
+            jobs.Rows[row].Tag is not ArchiveQueueItem item || jobs.Rows[row].Cells[column].Value is null)
+            return false;
+        if (column == RemoveColumn)
+            RemoveItem?.Invoke(item);
+        else
+            TogglePause?.Invoke(item);
+        return true;
     }
 }

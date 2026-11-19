@@ -28,7 +28,6 @@ internal sealed class MainWindow : Form
     private readonly SemaphoreSlim retentionEditor = new(1);
     private bool transferring;
     private bool closeWhenIdle;
-    private bool confirmingClose;
 
     public MainWindow(ArchiveSession? session)
     {
@@ -80,16 +79,18 @@ internal sealed class MainWindow : Form
         };
         queuePanel.TogglePause += item =>
         {
-            archiveQueue.TogglePause(item);
-            TryStartNextArchive();
+            if (ChangeQueue(() => archiveQueue.TogglePause(item)))
+                TryStartNextArchive();
         };
-        queuePanel.RemoveItem += archiveQueue.Remove;
+        queuePanel.RemoveItem += item => ChangeQueue(() => archiveQueue.Remove(item));
+        queuePanel.RemoveFinished += () => ChangeQueue(archiveQueue.RemoveFinished);
         Shown += async (_, _) => await Run(InitialLoad);
         FormClosing += OnClosing;
         FormClosed += (_, _) =>
         {
             StopStatusLookup();
             StopRestores();
+            archiveQueue.Dispose();
             help.Dispose();
             archive?.Dispose();
         };
@@ -157,7 +158,7 @@ internal sealed class MainWindow : Form
             await local;
             return;
         }
-        await Task.WhenAll(local, NavigateRemote(archive.Root, "My archive"));
+        await Task.WhenAll(local, NavigateRemote(archive.Root, "My archive"), LoadArchiveQueue(archive.Root, token));
     }
 
     private async Task LoadDefaultLocal()
@@ -315,13 +316,11 @@ internal sealed class MainWindow : Form
         }
     }
 
-    private async Task ToggleLogin(CancellationToken _)
+    private async Task ToggleLogin(CancellationToken token)
     {
         if (archive is not null)
         {
-            if (!ConfirmDiscardQueue("Signing out"))
-                return;
-            archiveQueue.ClearPending();
+            archiveQueue.Detach();
             StopStatusLookup();
             StopRestores();
             var currentArchive = archive;
@@ -339,8 +338,28 @@ internal sealed class MainWindow : Form
 
         archive = login.TakeSession();
         surf.SetHistory(new RecentFolders(archive.Root));
-        await NavigateRemote(archive.Root, "My archive");
         SetFeedback("");
+        await Task.WhenAll(NavigateRemote(archive.Root, "My archive"), LoadArchiveQueue(archive.Root, token));
+    }
+
+    private async Task LoadArchiveQueue(string root, CancellationToken token)
+    {
+        ArchiveQueueStore? store = null;
+        try
+        {
+            store = new ArchiveQueueStore(root);
+            var saved = await Task.Run(store.Read, token);
+            token.ThrowIfCancellationRequested();
+            archiveQueue.Attach(store, saved);
+            store = null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException
+            or System.Text.Json.JsonException)
+        {
+            transfers.Log($"Could not load the archive queue. {error.Message}");
+            SetFeedback(error.Message, error: true);
+        }
+        finally { store?.Dispose(); }
     }
 
     private async Task OpenPreview(ArchiveEntry file, bool local)
@@ -791,7 +810,7 @@ internal sealed class MainWindow : Form
 
     private async Task ArchiveSelected()
     {
-        if (operation is not null || archive is null || !surf.HasFolder || closeWhenIdle)
+        if (operation is not null || archive is null || !archiveQueue.IsAvailable || !surf.HasFolder || closeWhenIdle)
             return;
         var selection = windows.SelectedItems;
         string source = windows.PathShown;
@@ -809,7 +828,7 @@ internal sealed class MainWindow : Form
             }
             SetFeedback("Scanning selected data and checking staging space…");
             var requests = await Task.Run(() => ArchivePackage.PlanSelection(source, destination, selection, filesFolderName, token));
-            archiveQueue.CheckDestinations(requests);
+            archiveQueue.CheckDestinations(requests.Select(request => request.RemotePath));
             var existing = surf.SnapshotEntries().Select(entry => entry.Name).ToHashSet(StringComparer.Ordinal);
             foreach (var request in requests)
             {
@@ -823,17 +842,37 @@ internal sealed class MainWindow : Form
                 return;
             }
             token.ThrowIfCancellationRequested();
-            archiveQueue.Add(requests, options);
+            var queued = await Task.Run(() => requests.Select(request =>
+                ArchiveQueueItem.FromRequest(request, options, token)).ToArray(), token);
+            token.ThrowIfCancellationRequested();
+            archiveQueue.Add(queued);
             SetFeedback(requests.Count == 1 ? "Archive added to the queue." : $"{requests.Count:N0} archives added to the queue.");
         });
     }
 
     private void TryStartNextArchive()
     {
-        if (archiveOperation is not null || operation is not null || archive is null || closeWhenIdle || confirmingClose)
+        if (archiveOperation is not null || operation is not null || archive is null || closeWhenIdle)
             return;
-        if (archiveQueue.StartNext() is { } item)
+        ArchiveQueueItem? item = null;
+        if (ChangeQueue(() => item = archiveQueue.StartNext()) && item is not null)
             _ = RunQueuedArchive(item);
+    }
+
+    private bool ChangeQueue(Action change)
+    {
+        try
+        {
+            change();
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            string message = $"Could not save the archive queue. {error.Message}";
+            transfers.Log(message);
+            SetFeedback(message, error: true);
+            return false;
+        }
     }
 
     private async Task RunQueuedArchive(ArchiveQueueItem item)
@@ -842,61 +881,73 @@ internal sealed class MainWindow : Form
         archiveOperation = cancellation;
         var token = cancellation.Token;
         UpdateControls();
-        var request = item.Request;
+        ArchiveQueueState outcome = ArchiveQueueState.Failed;
+        string? detail = null;
         var options = item.Options with
         {
             Retention = item.Options.Retention with { ArchivedOn = DateOnly.FromDateTime(DateTime.Today) }
         };
         try
         {
-            if (options.LocalStagingFolder is { } local)
+            try
             {
-                var plan = await Task.Run(() => item.Request.Plan.WithPreferredStaging(local,
-                    PackageFiles.LocalStagingFreeBytes(local)), token);
-                request = request with { Plan = plan };
-                if (plan.UsesFallback)
+                if (operation is null)
+                    SetFeedback($"Checking the saved source selection for {item.Name}…");
+                var request = await Task.Run(() => item.Prepare(token), token);
+                token.ThrowIfCancellationRequested();
+                archiveQueue.SetRecoveryPath(item, request.LocalPath);
+                if (options.LocalStagingFolder is not null && request.Plan.UsesFallback)
                     transfers.Log($"Local staging has too little free space for {request.Name}. Using {request.LocalPath}.");
+                await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
+                    ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
+                        target, options, progress, token), token);
+                outcome = ArchiveQueueState.Finished;
+                transfers.Log($"{item.Name} was uploaded and verified.");
             }
-            await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
-                ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
-                    target, options, progress, token), token);
-            transfers.Log($"{request.Name} was uploaded and verified.");
-            if (operation is null && !closeWhenIdle &&
-                !archiveQueue.Items.Any(queued => queued.State == ArchiveQueueState.Queued))
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                bool refreshLocal = windows.PathShown.Equals(request.Plan.Source, StringComparison.OrdinalIgnoreCase);
-                bool refreshSurf = surf.PathShown == request.Parent;
-                if (refreshLocal || refreshSurf)
-                {
-                    await Run(async _ =>
-                    {
-                        if (refreshLocal)
-                            await NavigateLocal(request.Plan.Source, null);
-                        if (refreshSurf)
-                            await NavigateRemote(request.Parent, null);
-                    });
-                }
-                SetFeedback($"{request.Name} was uploaded and verified.");
+                outcome = closeWhenIdle ? ArchiveQueueState.Interrupted : ArchiveQueueState.Cancelled;
+                detail = closeWhenIdle ? "The app closed while this archive was running." : "Archive cancelled.";
+                transfers.Log($"{item.Name}. {detail}");
+                if (operation is null)
+                    SetFeedback(detail);
             }
-        }
-        catch (OperationCanceledException) when (token.IsCancellationRequested)
-        {
-            transfers.Log($"{request.Name} was cancelled.");
-            if (operation is null)
-                SetFeedback("Archive cancelled.");
-        }
-        catch (Exception error)
-        {
-            transfers.Log($"{request.Name} failed. {error.Message}");
-            if (operation is null)
-                SetFeedback(error.Message, error: true);
+            catch (Exception error)
+            {
+                detail = error.Message;
+                transfers.Log($"{item.Name} failed. {detail}");
+                if (operation is null)
+                    SetFeedback(detail, error: true);
+            }
+
+            if (ChangeQueue(() => archiveQueue.Finish(item.LocalName, outcome, detail)) && outcome == ArchiveQueueState.Finished)
+                await RefreshAfterArchive(item);
         }
         finally
         {
-            archiveQueue.Finish(item);
             archiveOperation = null;
             FinishWork();
         }
+    }
+
+    private async Task RefreshAfterArchive(ArchiveQueueItem item)
+    {
+        if (operation is not null || closeWhenIdle || archiveQueue.Items.Any(queued => queued.State == ArchiveQueueState.Queued))
+            return;
+        bool refreshLocal = windows.PathShown.Equals(item.Source, StringComparison.OrdinalIgnoreCase);
+        bool refreshSurf = surf.PathShown == item.Parent;
+        if (refreshLocal || refreshSurf)
+        {
+            await Run(async _ =>
+            {
+                if (refreshLocal)
+                    await NavigateLocal(item.Source, null);
+                if (refreshSurf)
+                    await NavigateRemote(item.Parent, null);
+            });
+        }
+        if (!closeWhenIdle)
+            SetFeedback($"{item.Name} was uploaded and verified.");
     }
 
     private async Task ResumeArchive()
@@ -925,6 +976,7 @@ internal sealed class MainWindow : Form
             }
             await RunPackage(manifest.RemoteName, folder, remote, (target, progress) =>
                 ArchivePackage.Resume(folder, target, progress, token), token);
+            ChangeQueue(() => archiveQueue.Finish(manifest.Name, ArchiveQueueState.Finished));
             if (surf.HasFolder)
                 await NavigateRemote(surf.PathShown, null);
             SetFeedback("Archive upload verified. Remaining local archive parts removed.");
@@ -1136,26 +1188,7 @@ internal sealed class MainWindow : Form
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
-        if (confirmingClose)
-        {
-            e.Cancel = true;
-            return;
-        }
-        if (!closeWhenIdle)
-        {
-            confirmingClose = true;
-            bool discard;
-            try { discard = ConfirmDiscardQueue("Closing SurfDataArchiveTransfer"); }
-            finally { confirmingClose = false; }
-            if (!discard)
-            {
-                e.Cancel = true;
-                TryStartNextArchive();
-                return;
-            }
-        }
         closeWhenIdle = true;
-        archiveQueue.ClearPending();
         StopRestores();
         if (operation is null && archiveOperation is null)
             return;
@@ -1164,10 +1197,6 @@ internal sealed class MainWindow : Form
         archiveOperation?.Cancel();
         UpdateControls();
     }
-
-    private bool ConfirmDiscardQueue(string action) => archiveQueue.PendingCount == 0 ||
-        MessageBox.Show(this, $"{action} will clear all waiting and paused queue entries. These entries have not started.",
-            "Clear archive queue?", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.OK;
 
     private void FinishWork()
     {
@@ -1201,7 +1230,7 @@ internal sealed class MainWindow : Form
         restore.Enabled = idle && online && selected.Any(item =>
             (item.IsDirectory ? item.HasSubfolders != true && !ArchiveStatus.IsOnDisk(item.Status) : ArchiveStatus.CanRestore(item.Status))
             && !restores.ContainsKey(ArchiveSession.Child(surf.PathShown, item.Name)));
-        package.Enabled = idle && online && surf.HasFolder && ArchivePackage.CanArchive(localSelection);
+        package.Enabled = idle && online && archiveQueue.IsAvailable && surf.HasFolder && ArchivePackage.CanArchive(localSelection);
         resume.Enabled = transferIdle && online;
         removeWindows.Enabled = transferIdle && windows.SelectedItems.Count > 0;
         removeSurf.Enabled = transferIdle && online && surf.SelectedItems.Count > 0;
