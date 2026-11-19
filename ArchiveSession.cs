@@ -104,17 +104,14 @@ internal sealed class ArchiveSession : IDisposable
             sftp.Connect();
     }
 
-    public async Task<List<ArchiveEntry>> List(string directory)
-    {
-        Reconnect();
-        return await ListEntries(sftp, directory, strict: false, CancellationToken.None);
-    }
+    public Task<List<ArchiveEntry>> ListIndependent(string directory) =>
+        WithIndependentListing(list => list(directory));
 
-    public async Task<List<ArchiveEntry>> ListIndependent(string directory)
+    public async Task<T> WithIndependentListing<T>(Func<Func<string, Task<List<ArchiveEntry>>>, Task<T>> read)
     {
         using var connection = CreateSftpClient();
         await connection.ConnectAsync(CancellationToken.None);
-        return await ListEntries(connection, directory, strict: false, CancellationToken.None);
+        return await read(directory => ListEntries(connection, directory, strict: false, CancellationToken.None));
     }
 
     private static async Task<List<ArchiveEntry>> ListEntries(SftpClient client, string directory, bool strict,

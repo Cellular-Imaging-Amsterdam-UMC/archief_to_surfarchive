@@ -14,6 +14,8 @@ The Local / NAS pane starts at `L:\`. The location menu also has shortcuts to `L
 
 You can create folders and remove unrelated files on SURF during a transfer. The app protects paths used by the transfer and refreshes the SURF listing when it creates an archive destination in the open folder. It also refreshes the visible Local / NAS source after removing archived originals.
 
+Both browsers stay available during transfers, including **Recent**, folder navigation, refresh, filters and previews. A transfer keeps the source files and destination it was started with.
+
 Only direct subfolders of `L:\Archief\Active` are checked in advance. A subfolder is listed when the app can open it, including when it is empty. Deeper folders are opened on demand.
 
 Double-click an HTML file (`.html` or `.htm`) to open it in your browser, or a `.txt` file to open it in Notepad. The app checks the current SURF status, requests a restore from tape if needed, and checks again every 15 seconds until the file is on disk. The preview opens automatically after downloading a temporary local copy. You can cancel the preview in **Activity**. A restore already submitted to SURF may continue. The app checks for previews older than seven days at startup. Edits to a temporary copy stay local. Remote HTML files that depend on other files need those assets downloaded separately.

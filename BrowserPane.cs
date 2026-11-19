@@ -156,7 +156,6 @@ internal sealed class BrowserPane : UserControl
     public bool HasFolder => Current is not null;
     public IReadOnlyList<ArchiveEntry> SelectedItems => files.SelectedItems.Cast<ListViewItem>()
         .Select(item => (ArchiveEntry)item.Tag!).ToArray();
-    public IReadOnlyList<ArchiveEntry> SelectedFiles => SelectedItems.Where(entry => !entry.IsDirectory).ToArray();
     public ArchiveEntry[] SnapshotEntries() => entries.ToArray();
     public bool HasKnownFolder(string path) => Find(folders.Nodes, path) is not null;
 
