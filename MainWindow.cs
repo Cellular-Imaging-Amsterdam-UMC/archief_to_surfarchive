@@ -19,7 +19,6 @@ internal sealed class MainWindow : Form
     private readonly Button newFolder = DarkTheme.Button("New folder", ActionIcon.FolderPlus);
     private readonly Label connection = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
     private readonly Label feedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
-    private readonly Button cancelScan = DarkTheme.Button("Cancel scan", ActionIcon.Cancel);
     private readonly System.Windows.Forms.Timer scanTimer = new() { Interval = 200 };
     private ActiveArchiveScan? activeArchiveScan;
     private ArchiveSession? archive;
@@ -51,11 +50,6 @@ internal sealed class MainWindow : Form
         StartPosition = FormStartPosition.CenterScreen;
         BuildLayout();
         scanTimer.Tick += (_, _) => RefreshScanStatus();
-        cancelScan.Click += (_, _) =>
-        {
-            if (activeArchiveScan is { } scan && scan.Job.Snapshot().Elapsed >= TimeSpan.FromSeconds(10))
-                CancelTransfer();
-        };
         RefreshScanStatus();
 
         windows.AddLocation(LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive);
@@ -185,20 +179,13 @@ internal sealed class MainWindow : Form
         layout.Controls.Add(queuePanel, 0, 3);
         transfers.Margin = new Padding(13, 0, 13, 0);
         layout.Controls.Add(transfers, 0, 4);
-        var statusBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
-            Margin = new Padding(14, 2, 13, 2) };
-        statusBar.ColumnStyles.Add(new(SizeType.Percent, 100));
-        statusBar.ColumnStyles.Add(new(SizeType.AutoSize));
-        statusBar.RowStyles.Add(new(SizeType.Percent, 100));
         feedback.AutoSize = false;
         feedback.AutoEllipsis = true;
         feedback.UseMnemonic = false;
         feedback.TextAlign = ContentAlignment.MiddleLeft;
         feedback.Dock = DockStyle.Fill;
-        feedback.Margin = Padding.Empty;
-        statusBar.Controls.Add(feedback, 0, 0);
-        statusBar.Controls.Add(cancelScan, 1, 0);
-        layout.Controls.Add(statusBar, 0, 5);
+        feedback.Margin = new Padding(14, 2, 13, 2);
+        layout.Controls.Add(feedback, 0, 5);
     }
 
     private async Task<ArchiveRequest> ScanArchive(ArchiveQueueItem item, CancellationToken token)
@@ -242,15 +229,12 @@ internal sealed class MainWindow : Form
         scanTimer.Enabled = active is not null;
         if (active is null)
         {
-            cancelScan.Visible = false;
             feedback.Text = feedbackMessage;
             feedback.ForeColor = feedbackIsError ? DarkTheme.Error : DarkTheme.Muted;
             return;
         }
         var (phase, files, folders, bytes) = active.Progress.Read();
         TimeSpan elapsed = active.Job.Snapshot().Elapsed;
-        cancelScan.Visible = elapsed >= TimeSpan.FromSeconds(10);
-        cancelScan.Enabled = !active.Token.IsCancellationRequested;
         active.Job.Report(new(active.Job.Name, (long)files + folders, 0, TotalKnown: false));
         string name = active.Job.Name is { Length: > 35 } longName ? longName[..34] + "…" : active.Job.Name;
         string label = active.Token.IsCancellationRequested ? "Cancelling scan…" : phase;

@@ -28,7 +28,7 @@ Select only folders or only files in **Local / NAS**. Use **Archive to SURF** to
 
 The **Queue** above **Activity** saves archive jobs and their settings locally for each SURF account. After sign-in, waiting jobs start automatically in queue order. Paused jobs stay paused until you use the resume icon. The app scans each selected folder when its job starts, so the archive contains the files found at that point. Selected loose files must still match their listed sizes and modification times.
 
-You can keep browsing and use **Archive to SURF** to add another selection while a scan or transfer runs. **Scan source** is the first step in **Activity**. It counts files and folders, checks staging space and reports elapsed time. The bottom status bar also shows the size of the files found so far. Use **Cancel activity** to stop the current archive, or **Cancel scan** in the status bar once the scan has taken ten seconds.
+You can keep browsing and use **Archive to SURF** to add another selection while a scan or transfer runs. **Scan source** is the first step in **Activity**. It counts files and folders, checks staging space and reports elapsed time. The bottom status bar also shows the size of the files found so far. To stop a scan, use **Cancel activity**.
 
 The size shown during a scan is the combined size of the files found so far. Deep folder trees can take time to enumerate on a NAS even when their early files are small.
 
