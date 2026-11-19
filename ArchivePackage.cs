@@ -27,6 +27,11 @@ internal sealed record ArchiveRequest(PackagePlan Plan, string LocalName, string
     public string RemotePath => ArchiveSession.Child(Parent, Name);
 }
 
+internal sealed record ArchiveSelection(string Source, string Parent, string Name, ArchiveEntry[] Items)
+{
+    public string RemotePath => ArchiveSession.Child(Parent, Name);
+}
+
 internal interface IPackageDestination
 {
     string Root { get; }
@@ -49,13 +54,13 @@ internal static class ArchivePackage
     public static bool CanArchive(IReadOnlyList<ArchiveEntry> selection) =>
         selection.Count > 0 && (selection.All(item => item.IsDirectory) || selection.All(item => !item.IsDirectory));
 
-    public static List<ArchiveRequest> PlanSelection(string source, string remoteParent, IReadOnlyList<ArchiveEntry> selection,
-        string? filesFolderName, CancellationToken token, ArchiveScanProgress? progress = null)
+    public static List<ArchiveSelection> DescribeSelection(string source, string remoteParent,
+        IReadOnlyList<ArchiveEntry> selection, string? filesFolderName)
     {
         if (!CanArchive(selection))
             throw new IOException("Select only files or only folders to archive.");
 
-        var requests = new List<ArchiveRequest>();
+        var requests = new List<ArchiveSelection>();
         if (selection[0].IsDirectory)
         {
             foreach (var folder in selection)
@@ -63,15 +68,14 @@ internal static class ArchivePackage
         }
         else
         {
-            Add(filesFolderName ?? "", selection);
+            Add(filesFolderName ?? "", selection.ToArray());
         }
         return requests;
 
-        void Add(string name, IReadOnlyList<ArchiveEntry> items)
+        void Add(string name, ArchiveEntry[] items)
         {
             ValidateFolderName(name);
-            progress?.SetPhase($"Scanning {name}");
-            requests.Add(new(PackagePlan.Create(source, items, token, progress), NewName(), name, remoteParent, items));
+            requests.Add(new(source, remoteParent, name, items));
         }
     }
 

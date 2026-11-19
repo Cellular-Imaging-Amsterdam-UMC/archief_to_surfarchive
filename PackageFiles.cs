@@ -18,16 +18,8 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         IgnoreInaccessible = false, AttributesToSkip = 0, ReturnSpecialDirectories = false, BufferSize = 64 * 1024
     };
 
-    public PackagePlan WithPreferredStaging(string localFolder, ulong freeBytes)
-    {
-        bool fallback = freeBytes < (ulong)Required;
-        string staging = fallback ? PackageFiles.FallbackFolder() : localFolder;
-        CheckStagingLocation(Source, Entries, staging);
-        return this with { StagingParent = staging, UsesFallback = fallback };
-    }
-
     public static PackagePlan Create(string source, IReadOnlyList<ArchiveEntry> selected, CancellationToken token,
-        ArchiveScanProgress? progress = null)
+        ArchiveScanProgress? progress = null, string? preferredStaging = null, bool checkSelectedFiles = false)
     {
         source = Path.TrimEndingDirectorySeparator(Path.GetFullPath(source));
         PackageFiles.GetRegularAttributes(source);
@@ -36,7 +28,11 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         {
             if (string.IsNullOrEmpty(item.Name) || item.Name is "." or ".." || item.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
                 throw new IOException("A selected name is not a normal Windows file or folder name.");
-            roots.Add(ReadEntry(new FileInfo(Path.Combine(source, item.Name)), item.Name, item.IsDirectory));
+            var entry = ReadEntry(new FileInfo(Path.Combine(source, item.Name)), item.Name, item.IsDirectory);
+            if (checkSelectedFiles && !item.IsDirectory &&
+                (entry.Size != item.Size || entry.Modified != item.Modified.ToUniversalTime()))
+                throw new IOException($"The selected file changed: {entry.Path}. Refresh the source folder and queue it again.");
+            roots.Add(entry);
         }
 
         if (roots.Count == 0)
@@ -54,8 +50,10 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
         long required = checked(bytes + bytes / 256 + overhead + (1L << 20));
         token.ThrowIfCancellationRequested();
         progress?.SetPhase("Checking staging space");
-        bool fallback = !IsArchiveDrive(source) && PackageFiles.AvailableBytes(source) < (ulong)required;
-        string staging = fallback ? PackageFiles.FallbackFolder() : source;
+        bool fallback = preferredStaging is { } local
+            ? PackageFiles.LocalStagingFreeBytes(local) < (ulong)required
+            : !IsArchiveDrive(source) && PackageFiles.AvailableBytes(source) < (ulong)required;
+        string staging = fallback ? PackageFiles.FallbackFolder() : preferredStaging ?? source;
         CheckStagingLocation(source, entries, staging);
         token.ThrowIfCancellationRequested();
         return new(source, entries, bytes, required, staging, fallback);

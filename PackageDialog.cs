@@ -83,14 +83,15 @@ internal static class PackageDialog
         return dialog.ShowDialog(owner) == DialogResult.OK ? name : null;
     }
 
-    public static PackageOptions? Confirm(Form owner, IReadOnlyList<ArchiveRequest> requests)
+    public static PackageOptions? Confirm(Form owner, IReadOnlyList<ArchiveSelection> requests)
     {
         using var dialog = CreateDialog("Archive to SURF Data Archive", new Size(764, 735));
-        var layout = Layout([31, 54, 28, 38, 24, 29, 35, 46, -1, 29, 150, 42, 40]);
+        var layout = Layout([31, 70, 28, 38, 24, 29, 35, 46, -1, 29, 150, 42, 40]);
         dialog.Controls.Add(layout);
         layout.Controls.Add(DarkTheme.Label("Add selected archives to the queue?", DarkTheme.Heading), 0, 0);
         var explanation = DarkTheme.Label(
-            "Create a ZIP in numbered parts of up to 200 MB. Finished parts upload while packing continues. " +
+            "When the job starts, the app scans the current contents of the selected folders and checks staging space. " +
+            "It creates a ZIP in numbered parts of up to 200 MB and uploads parts as they finish. " +
             "The archive includes contents files and retention.json. Open the .zip.001 file in 7-Zip to extract it. " +
             "Windows permissions are outside the ZIP archive.");
         explanation.AutoSize = false;
@@ -107,11 +108,10 @@ internal static class PackageDialog
         warning.Dock = DockStyle.Fill;
         layout.Controls.Add(warning, 0, 3);
 
-        int itemsCount = requests.Sum(request => request.Plan.Entries.Count);
-        long bytes = requests.Sum(request => request.Plan.Bytes);
+        int itemsCount = requests.Sum(request => request.Items.Length);
         string archives = requests.Count == 1 ? "1 archive" : $"{requests.Count:N0} archives";
-        string entries = itemsCount == 1 ? "1 item" : $"{itemsCount:N0} items";
-        layout.Controls.Add(DarkTheme.Label($"{archives} · {entries} · {TransferJob.FormatBytes(bytes)} source data",
+        string entries = itemsCount == 1 ? "1 selected item" : $"{itemsCount:N0} selected items";
+        layout.Controls.Add(DarkTheme.Label($"{archives} · {entries}",
             DarkTheme.Small, DarkTheme.Muted), 0, 4);
         var preference = LocalStagingSettings.Read();
         var stageLocally = new CheckBox
@@ -141,6 +141,11 @@ internal static class PackageDialog
         items.ScrollBars = ScrollBars.Both;
         DarkTheme.Explorer(items);
         layout.Controls.Add(items, 0, 8);
+        items.Lines = requests.SelectMany(request => new[] {
+            $"SURF    {request.RemotePath}", $"Source   {request.Source}",
+            $"Items   {string.Join("  ·  ", request.Items.Select(item => item.Name + (item.IsDirectory ? " [folder]" : "")))}", ""
+        }).ToArray();
+        items.Select(0, 0);
 
         var retention = new RetentionMetadata(DateOnly.FromDateTime(DateTime.Today), new RetentionFields());
         var fields = new RetentionInput(retention);
@@ -209,7 +214,6 @@ internal static class PackageDialog
 
         bool UpdateStaging()
         {
-            IReadOnlyList<ArchiveRequest> shown = requests;
             stagingInfo.ForeColor = DarkTheme.Muted;
             browse.Enabled = stageLocally.Checked;
             bool ready = true;
@@ -218,20 +222,8 @@ internal static class PackageDialog
                 try
                 {
                     ulong free = PackageFiles.LocalStagingFreeBytes(stagingPath.Text);
-                    shown = requests.Select(request => request with
-                    {
-                        Plan = request.Plan.WithPreferredStaging(stagingPath.Text, free)
-                    }).ToArray();
-                    long required = shown.Max(request => request.Plan.Required);
-                    int fallback = shown.Count(request => request.Plan.UsesFallback);
-                    stagingInfo.Text = $"{TransferJob.FormatBytes(free)} free locally. " +
-                        $"The largest archive needs about {TransferJob.FormatBytes(required)}.";
-                    if (fallback > 0)
-                    {
-                        stagingInfo.ForeColor = DarkTheme.Amber;
-                        stagingInfo.Text += fallback == 1 ? " One archive will use the staging folder on L:."
-                            : $" {fallback:N0} archives will use the staging folder on L:.";
-                    }
+                    stagingInfo.Text = $"{TransferJob.FormatBytes(free)} free locally. When the job starts, " +
+                        "the app checks if the archive fits and uses staging on L: if needed.";
                 }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException)
                 {
@@ -242,15 +234,8 @@ internal static class PackageDialog
             }
             else
             {
-                stagingInfo.Text = requests.Any(request => request.Plan.UsesFallback)
-                    ? "Some archives will use the staging folder on L: because the source drive has less free space."
-                    : "ZIP parts will be staged next to the source data.";
+                stagingInfo.Text = "The app stages ZIP parts next to the source, with a fallback on L: if the source drive has too little space.";
             }
-            items.Lines = shown.SelectMany(request => new[] {
-                $"SURF    {request.RemotePath}", $"Local   {request.LocalPath}",
-                $"Items   {string.Join("  ·  ", request.Items.Select(item => item.Name + (item.IsDirectory ? " [folder]" : "")))}", ""
-            }).ToArray();
-            items.Select(0, 0);
             return ready;
         }
 

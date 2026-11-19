@@ -27,7 +27,7 @@ internal sealed record ArchiveQueueProgress(int Completed, int Total, TimeSpan E
 }
 
 internal sealed record ArchiveQueueItem(string LocalName, string Name, string Source, string Parent, ArchiveEntry[] Selection,
-    string SourceHash, PackageOptions Options, ArchiveQueueState State = ArchiveQueueState.Queued,
+    string? SourceHash, PackageOptions Options, ArchiveQueueState State = ArchiveQueueState.Queued,
     string? RecoveryPath = null, string? Detail = null, ArchiveQueueProgress? Progress = null)
 {
     [JsonIgnore]
@@ -37,28 +37,24 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
     public bool CanResumeUpload => RecoveryPath is not null
         && State is ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled;
 
-    public static ArchiveQueueItem FromRequest(ArchiveRequest request, PackageOptions options, CancellationToken token,
-        ArchiveScanProgress? progress = null) =>
-        new(request.LocalName, request.Name, request.Plan.Source, request.Parent, request.Items.ToArray(),
-            Fingerprint(request.Plan, token, progress), options);
+    public static ArchiveQueueItem FromSelection(ArchiveSelection selection, PackageOptions options) =>
+        new(ArchivePackage.NewName(), selection.Name, selection.Source, selection.Parent, selection.Items, null, options);
 
     public ArchiveRequest Prepare(CancellationToken token, ArchiveScanProgress? progress = null)
     {
-        var plan = PackagePlan.Create(Source, Selection, token, progress);
-        progress?.SetPhase("Comparing with queued selection");
-        if (Fingerprint(plan, token) != SourceHash)
-            throw new IOException("The source selection changed after it was queued. Review the selection and add it to the queue again.");
-        if (Options.LocalStagingFolder is { } local)
+        var plan = PackagePlan.Create(Source, Selection, token, progress, Options.LocalStagingFolder,
+            checkSelectedFiles: SourceHash is null);
+        if (SourceHash is { } hash)
         {
-            progress?.SetPhase("Checking local staging space");
-            token.ThrowIfCancellationRequested();
-            plan = plan.WithPreferredStaging(local, PackageFiles.LocalStagingFreeBytes(local));
+            progress?.SetPhase("Comparing with queued selection");
+            if (Fingerprint(plan, token) != hash)
+                throw new IOException("The source selection changed after it was queued. Review the selection and add it to the queue again.");
         }
         token.ThrowIfCancellationRequested();
         return new(plan, LocalName, Name, Parent, Selection);
     }
 
-    private static string Fingerprint(PackagePlan plan, CancellationToken token, ArchiveScanProgress? progress = null)
+    private static string Fingerprint(PackagePlan plan, CancellationToken token)
     {
         using var sha = SHA256.Create();
         using var output = new CryptoStream(Stream.Null, sha, CryptoStreamMode.Write);
@@ -69,7 +65,6 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
             {
                 token.ThrowIfCancellationRequested();
                 JsonSerializer.Serialize(json, entry);
-                progress?.Add(entry.IsDirectory, entry.Size);
             }
             json.WriteEndArray();
         }
@@ -80,7 +75,8 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
 
 internal sealed class ArchiveQueue : IDisposable
 {
-    public static int ArchiveSteps { get; } = Enum.GetValues<PackageStep>().Length;
+    public const int ScanSteps = 1;
+    public static int ArchiveSteps { get; } = ScanSteps + Enum.GetValues<PackageStep>().Length;
     private const int RecoverySteps = 4;
     private List<ArchiveQueueItem> items = [];
     private ArchiveQueueStore? store;

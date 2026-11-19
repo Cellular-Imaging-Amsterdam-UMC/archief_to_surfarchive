@@ -82,7 +82,7 @@ internal sealed partial class ArchiveQueueStore : IDisposable
             || string.IsNullOrEmpty(item.Source) || !Path.IsPathFullyQualified(item.Source)
             || item.Selection is not { Length: > 0 } || item.Selection.Any(entry => entry is null || string.IsNullOrEmpty(entry.Name))
             || !ArchivePackage.CanArchive(item.Selection)
-            || item.SourceHash is not { Length: 64 } || !item.SourceHash.All(Uri.IsHexDigit)
+            || item.SourceHash is { } hash && (hash.Length != 64 || !hash.All(Uri.IsHexDigit))
             || item.Options?.Retention?.Fields is not { Years: >= 1 and <= RetentionMetadata.MaximumYears }
             || item.Progress is { } progress && (progress.Total < 1 || progress.Completed < 0 ||
                 progress.Completed > progress.Total || progress.Elapsed < TimeSpan.Zero)
