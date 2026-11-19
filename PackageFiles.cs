@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -11,64 +12,122 @@ internal record PackageEntry(string Path, string Name, bool IsDirectory, long Si
 internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> Entries, long Bytes, long Required,
     string StagingParent, bool UsesFallback)
 {
+    private static readonly EnumerationOptions ScanEntries = new()
+    {
+        IgnoreInaccessible = false, AttributesToSkip = 0, ReturnSpecialDirectories = false, BufferSize = 64 * 1024
+    };
+
     public PackagePlan WithPreferredStaging(string localFolder, ulong freeBytes)
     {
         bool fallback = freeBytes < (ulong)Required;
         string staging = fallback ? PackageFiles.FallbackFolder() : localFolder;
-        CheckStagingLocation(Entries, staging);
+        CheckStagingLocation(Source, Entries, staging);
         return this with { StagingParent = staging, UsesFallback = fallback };
     }
 
-    public static PackagePlan Create(string source, IReadOnlyList<ArchiveEntry> selected, CancellationToken token)
+    public static PackagePlan Create(string source, IReadOnlyList<ArchiveEntry> selected, CancellationToken token,
+        ArchiveScanProgress? progress = null)
     {
         source = Path.TrimEndingDirectorySeparator(Path.GetFullPath(source));
         PackageFiles.GetRegularAttributes(source);
-        var entries = new List<PackageEntry>();
+        var roots = new List<PackageEntry>(selected.Count);
         foreach (var item in selected)
         {
             if (string.IsNullOrEmpty(item.Name) || item.Name is "." or ".." || item.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
                 throw new IOException("A selected name is not a normal Windows file or folder name.");
-            Add(Path.Combine(source, item.Name), item.Name, item.IsDirectory);
+            roots.Add(ReadEntry(new FileInfo(Path.Combine(source, item.Name)), item.Name, item.IsDirectory));
         }
 
-        if (entries.Count == 0)
+        if (roots.Count == 0)
             throw new IOException("Select at least one file or folder.");
-        long bytes = entries.Sum(item => item.Size);
-        // Budget for incompressible input, archive headers, and package metadata.
-        long required = checked(bytes + bytes / 256 + entries.Sum(item => 4096L + 12L * item.Name.Length) + (1L << 20));
-        bool fallback = !IsArchiveDrive(source) && PackageFiles.AvailableBytes(source) < (ulong)required;
-        string staging = fallback ? PackageFiles.FallbackFolder() : source;
-        CheckStagingLocation(entries, staging);
-        return new(source, entries, bytes, required, staging, fallback);
 
-        void Add(string path, string name, bool? expectedDirectory)
+        var next = roots.Where(item => item.IsDirectory).ToList();
+        var children = new Dictionary<string, List<PackageEntry>>(StringComparer.Ordinal);
+        var workers = new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = token };
+        while (next.Count > 0)
         {
             token.ThrowIfCancellationRequested();
-            string leaf = Path.GetFileName(path);
+            var level = next;
+            var listings = new List<PackageEntry>[level.Count];
+            try
+            {
+                Parallel.For(0, level.Count, workers, i =>
+                {
+                    var folder = level[i];
+                    var items = new List<PackageEntry>();
+                    foreach (var metadata in new DirectoryInfo(folder.Path).EnumerateFileSystemInfos("*", ScanEntries))
+                        items.Add(ReadEntry(metadata, folder.Name + metadata.Name, null));
+                    listings[i] = items;
+                });
+            }
+            catch (AggregateException error) when (error.InnerExceptions.Count == 1)
+            {
+                ExceptionDispatchInfo.Throw(error.InnerExceptions[0]);
+            }
+
+            next = [];
+            for (int i = 0; i < level.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                children.Add(level[i].Path, listings[i]);
+                next.AddRange(listings[i].Where(item => item.IsDirectory));
+            }
+        }
+
+        var entries = new List<PackageEntry>();
+        long bytes = 0, overhead = 0;
+        progress?.SetPhase("Finishing the file list");
+        foreach (var root in roots)
+            AddTree(root);
+        // Budget for incompressible input, archive headers, and package metadata.
+        long required = checked(bytes + bytes / 256 + overhead + (1L << 20));
+        token.ThrowIfCancellationRequested();
+        progress?.SetPhase("Checking staging space");
+        bool fallback = !IsArchiveDrive(source) && PackageFiles.AvailableBytes(source) < (ulong)required;
+        string staging = fallback ? PackageFiles.FallbackFolder() : source;
+        CheckStagingLocation(source, entries, staging);
+        token.ThrowIfCancellationRequested();
+        return new(source, entries, bytes, required, staging, fallback);
+
+        PackageEntry ReadEntry(FileSystemInfo metadata, string name, bool? expectedDirectory)
+        {
+            token.ThrowIfCancellationRequested();
+            string path = metadata.FullName;
+            string leaf = metadata.Name;
             if (leaf.EndsWith(' ') || leaf.EndsWith('.') || leaf.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
                 throw new IOException($"The name cannot be safely archived and removed on Windows: {path}");
-            var info = PackageFiles.GetRegularAttributes(path);
+            var attributes = metadata.Attributes;
+            if (attributes == (FileAttributes)(-1))
+                throw new FileNotFoundException($"The archive source no longer exists: {path}", path);
+            var info = PackageFiles.CheckRegularAttributes(attributes, path);
             bool isDirectory = info.HasFlag(FileAttributes.Directory);
             if (expectedDirectory.HasValue && isDirectory != expectedDirectory.Value)
                 throw new IOException($"'{path}' changed since selection.");
-            if (isDirectory)
-            {
-                entries.Add(new(path, name + "/", true, 0, Directory.GetLastWriteTimeUtc(path)));
-                foreach (string child in Directory.EnumerateFileSystemEntries(path, "*", new EnumerationOptions
-                         { IgnoreInaccessible = false, AttributesToSkip = 0, ReturnSpecialDirectories = false }))
-                    Add(child, name + "/" + Path.GetFileName(child), null);
-            }
-            else
-            {
-                var file = new FileInfo(path);
-                entries.Add(new(path, name, false, file.Length, file.LastWriteTimeUtc));
-            }
+            string entryName = isDirectory ? name + "/" : name;
+            long size = isDirectory ? 0 : ((FileInfo)metadata).Length;
+            var entry = new PackageEntry(path, entryName, isDirectory, size, metadata.LastWriteTimeUtc);
+            progress?.Add(isDirectory, size);
+            return entry;
+        }
+
+        void AddTree(PackageEntry item)
+        {
+            token.ThrowIfCancellationRequested();
+            entries.Add(item);
+            bytes = checked(bytes + item.Size);
+            overhead = checked(overhead + 4096L + 12L * item.Name.Length);
+            // The contents tree and safe removal depend on depth-first archive order.
+            if (item.IsDirectory)
+                foreach (var child in children[item.Path])
+                    AddTree(child);
         }
     }
 
-    private static void CheckStagingLocation(IReadOnlyList<PackageEntry> entries, string staging)
+    private static void CheckStagingLocation(string source, IReadOnlyList<PackageEntry> entries, string staging)
     {
-        if (entries.Any(item => item.IsDirectory && PackageFiles.IsWithin(staging, item.Path)))
+        if (PackageFiles.IsWithin(staging, source) &&
+            !Path.GetRelativePath(source, staging).Equals(".", StringComparison.Ordinal) &&
+            entries.Any(item => item.IsDirectory && PackageFiles.IsWithin(staging, item.Path)))
             throw new IOException("The staging location is inside a selected folder.");
     }
 
@@ -128,7 +187,7 @@ internal static class PackageFiles
         return CheckRegularAttributes(File.GetAttributes(path), path);
     }
 
-    private static FileAttributes CheckRegularAttributes(FileAttributes attributes, string path)
+    internal static FileAttributes CheckRegularAttributes(FileAttributes attributes, string path)
     {
         if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Encrypted)) != 0)
             throw new IOException($"Reparse points and encrypted items are not supported: {path}");

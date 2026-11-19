@@ -37,21 +37,28 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
     public bool CanResumeUpload => RecoveryPath is not null
         && State is ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled;
 
-    public static ArchiveQueueItem FromRequest(ArchiveRequest request, PackageOptions options, CancellationToken token) =>
+    public static ArchiveQueueItem FromRequest(ArchiveRequest request, PackageOptions options, CancellationToken token,
+        ArchiveScanProgress? progress = null) =>
         new(request.LocalName, request.Name, request.Plan.Source, request.Parent, request.Items.ToArray(),
-            Fingerprint(request.Plan, token), options);
+            Fingerprint(request.Plan, token, progress), options);
 
-    public ArchiveRequest Prepare(CancellationToken token)
+    public ArchiveRequest Prepare(CancellationToken token, ArchiveScanProgress? progress = null)
     {
-        var plan = PackagePlan.Create(Source, Selection, token);
+        var plan = PackagePlan.Create(Source, Selection, token, progress);
+        progress?.SetPhase("Comparing with queued selection");
         if (Fingerprint(plan, token) != SourceHash)
             throw new IOException("The source selection changed after it was queued. Review the selection and add it to the queue again.");
         if (Options.LocalStagingFolder is { } local)
+        {
+            progress?.SetPhase("Checking local staging space");
+            token.ThrowIfCancellationRequested();
             plan = plan.WithPreferredStaging(local, PackageFiles.LocalStagingFreeBytes(local));
+        }
+        token.ThrowIfCancellationRequested();
         return new(plan, LocalName, Name, Parent, Selection);
     }
 
-    private static string Fingerprint(PackagePlan plan, CancellationToken token)
+    private static string Fingerprint(PackagePlan plan, CancellationToken token, ArchiveScanProgress? progress = null)
     {
         using var sha = SHA256.Create();
         using var output = new CryptoStream(Stream.Null, sha, CryptoStreamMode.Write);
@@ -62,6 +69,7 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
             {
                 token.ThrowIfCancellationRequested();
                 JsonSerializer.Serialize(json, entry);
+                progress?.Add(entry.IsDirectory, entry.Size);
             }
             json.WriteEndArray();
         }

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace SurfArchive;
 
 internal sealed class MainWindow : Form
@@ -19,6 +21,10 @@ internal sealed class MainWindow : Form
     private readonly Button newFolder = DarkTheme.Button("New folder", ActionIcon.FolderPlus);
     private readonly Label connection = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
     private readonly Label feedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
+    private readonly Label scanFeedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
+    private readonly Button cancelScan = DarkTheme.Button("Cancel scan", ActionIcon.Cancel);
+    private readonly System.Windows.Forms.Timer scanTimer = new() { Interval = 200 };
+    private readonly List<ActiveArchiveScan> archiveScans = [];
     private ArchiveSession? archive;
     private CancellationTokenSource? operation;
     private CancellationTokenSource? archiveOperation;
@@ -43,6 +49,14 @@ internal sealed class MainWindow : Form
         ClientSize = new Size(1410, 850);
         StartPosition = FormStartPosition.CenterScreen;
         BuildLayout();
+        scanTimer.Tick += (_, _) => RefreshScanStatus();
+        cancelScan.Click += (_, _) =>
+        {
+            if (archiveScans.LastOrDefault() is { } scan && scan.Clock.Elapsed >= TimeSpan.FromSeconds(10))
+                scan.Cancellation.Cancel();
+            RefreshScanStatus();
+        };
+        RefreshScanStatus();
 
         windows.AddLocation(LocalFiles.ArchiveDrive, LocalFiles.ArchiveDrive);
         windows.AddLocation(LocalFiles.BasicFolder, LocalFiles.BasicFolder);
@@ -96,6 +110,7 @@ internal sealed class MainWindow : Form
         FormClosing += OnClosing;
         FormClosed += (_, _) =>
         {
+            scanTimer.Dispose();
             StopStatusLookup();
             StopRestores();
             archiveQueue.Dispose();
@@ -133,7 +148,7 @@ internal sealed class MainWindow : Form
             layout.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
         layout.RowStyles.Add(queueHeight);
         layout.RowStyles.Add(activityHeight);
-        layout.RowStyles.Add(new(SizeType.Absolute, 25));
+        layout.RowStyles.Add(new(SizeType.Absolute, 32));
         Controls.Add(layout);
 
         var header = new TableLayoutPanel
@@ -170,11 +185,54 @@ internal sealed class MainWindow : Form
         layout.Controls.Add(queuePanel, 0, 3);
         transfers.Margin = new Padding(13, 0, 13, 0);
         layout.Controls.Add(transfers, 0, 4);
-        feedback.AutoSize = false;
-        feedback.AutoEllipsis = true;
-        feedback.Dock = DockStyle.Fill;
-        feedback.Margin = new Padding(14, 4, 14, 0);
-        layout.Controls.Add(feedback, 0, 5);
+        var statusBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+            Margin = new Padding(14, 2, 13, 2) };
+        statusBar.ColumnStyles.Add(new(SizeType.Percent, 100));
+        statusBar.ColumnStyles.Add(new(SizeType.AutoSize));
+        var statusText = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
+        foreach (var label in new[] { feedback, scanFeedback })
+        {
+            label.AutoSize = false;
+            label.AutoEllipsis = true;
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            label.Dock = DockStyle.Fill;
+            statusText.Controls.Add(label);
+        }
+        statusBar.Controls.Add(statusText, 0, 0);
+        statusBar.Controls.Add(cancelScan, 1, 0);
+        layout.Controls.Add(statusBar, 0, 5);
+    }
+
+    private async Task<T> ScanArchive<T>(CancellationTokenSource cancellation, string phase,
+        Func<ArchiveScanProgress, CancellationToken, T> scan)
+    {
+        var active = new ActiveArchiveScan(cancellation, new(phase));
+        archiveScans.Add(active);
+        RefreshScanStatus();
+        try { return await Task.Run(() => scan(active.Progress, cancellation.Token), cancellation.Token); }
+        finally
+        {
+            archiveScans.Remove(active);
+            RefreshScanStatus();
+        }
+    }
+
+    private void RefreshScanStatus()
+    {
+        var active = archiveScans.LastOrDefault();
+        scanTimer.Enabled = active is not null;
+        feedback.Visible = active is null;
+        scanFeedback.Visible = active is not null;
+        cancelScan.Visible = active is not null && active.Clock.Elapsed >= TimeSpan.FromSeconds(10);
+        cancelScan.Enabled = active is not null && !active.Cancellation.IsCancellationRequested;
+        if (active is null)
+            return;
+        var (phase, files, folders, bytes) = active.Progress.Read();
+        string label = active.Cancellation.IsCancellationRequested ? "Cancelling scan…" : phase;
+        if (label.Length > 52)
+            label = label[..51] + "…";
+        scanFeedback.Text = $"{label}  ·  {files + folders:N0} items ({files:N0} files, {folders:N0} folders)" +
+            $"  ·  {TransferJob.FormatBytes(bytes)}  ·  {TransferJob.FormatTime(active.Clock.Elapsed)}";
     }
 
     private async Task InitialLoad(CancellationToken token)
@@ -871,8 +929,9 @@ internal sealed class MainWindow : Form
                 if (filesFolderName is null)
                     return;
             }
-            SetFeedback("Scanning selected data and checking staging space…");
-            var requests = await Task.Run(() => ArchivePackage.PlanSelection(source, destination, selection, filesFolderName, token));
+            var cancellation = operation!;
+            var requests = await ScanArchive(cancellation, "Scanning selection", (progress, ct) =>
+                ArchivePackage.PlanSelection(source, destination, selection, filesFolderName, ct, progress));
             archiveQueue.CheckDestinations(requests.Select(request => request.RemotePath));
             var existing = surf.SnapshotEntries().Select(entry => entry.Name).ToHashSet(StringComparer.Ordinal);
             foreach (var request in requests)
@@ -887,8 +946,8 @@ internal sealed class MainWindow : Form
                 return;
             }
             token.ThrowIfCancellationRequested();
-            var queued = await Task.Run(() => requests.Select(request =>
-                ArchiveQueueItem.FromRequest(request, options, token)).ToArray(), token);
+            var queued = await ScanArchive(cancellation, "Preparing the archive queue", (progress, ct) => requests.Select(request =>
+                ArchiveQueueItem.FromRequest(request, options, ct, progress)).ToArray());
             token.ThrowIfCancellationRequested();
             archiveQueue.Add(queued);
             SetFeedback(requests.Count == 1 ? "Archive added to the queue." : $"{requests.Count:N0} archives added to the queue.");
@@ -938,9 +997,7 @@ internal sealed class MainWindow : Form
         {
             try
             {
-                if (operation is null)
-                    SetFeedback($"Checking the saved source selection for {item.Name}…");
-                request = await Task.Run(() => item.Prepare(token), token);
+                request = await ScanArchive(cancellation, $"Rescanning {item.Name}", (progress, ct) => item.Prepare(ct, progress));
                 token.ThrowIfCancellationRequested();
                 archiveQueue.SetRecoveryPath(item, request.LocalPath);
                 if (options.LocalStagingFolder is not null && request.Plan.UsesFallback)
@@ -1440,4 +1497,9 @@ internal sealed class MainWindow : Form
     }
 
     private sealed record RestoreActivity(TransferJob Job, RestorePolling Polling, CancellationTokenSource Cancellation);
+
+    private sealed record ActiveArchiveScan(CancellationTokenSource Cancellation, ArchiveScanProgress Progress)
+    {
+        public Stopwatch Clock { get; } = Stopwatch.StartNew();
+    }
 }

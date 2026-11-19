@@ -50,7 +50,7 @@ internal static class ArchivePackage
         selection.Count > 0 && (selection.All(item => item.IsDirectory) || selection.All(item => !item.IsDirectory));
 
     public static List<ArchiveRequest> PlanSelection(string source, string remoteParent, IReadOnlyList<ArchiveEntry> selection,
-        string? filesFolderName, CancellationToken token)
+        string? filesFolderName, CancellationToken token, ArchiveScanProgress? progress = null)
     {
         if (!CanArchive(selection))
             throw new IOException("Select only files or only folders to archive.");
@@ -70,7 +70,8 @@ internal static class ArchivePackage
         void Add(string name, IReadOnlyList<ArchiveEntry> items)
         {
             ValidateFolderName(name);
-            requests.Add(new(PackagePlan.Create(source, items, token), NewName(), name, remoteParent, items));
+            progress?.SetPhase($"Scanning {name}");
+            requests.Add(new(PackagePlan.Create(source, items, token, progress), NewName(), name, remoteParent, items));
         }
     }
 
