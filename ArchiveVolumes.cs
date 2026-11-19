@@ -25,6 +25,7 @@ internal sealed class VolumeWriter(string folder, string archiveName, long maxim
     private readonly List<ArchivePart> parts = [];
     private string name = "";
     private long length;
+    public long BytesWritten { get; private set; }
     public override bool CanRead => false;
     public override bool CanWrite => true;
 
@@ -44,6 +45,7 @@ internal sealed class VolumeWriter(string folder, string archiveName, long maxim
             stream.Write(chunk);
             hash.AppendData(chunk);
             length += count;
+            BytesWritten += count;
             data = data[count..];
             if (length == maximum)
                 CloseVolume();
@@ -80,7 +82,7 @@ internal sealed class VolumeWriter(string folder, string archiveName, long maxim
     }
 }
 
-internal sealed class HashingFileStream(SafeFileHandle source, Action<int> read, CancellationToken token) : SequentialStream
+internal sealed class HashingFileStream(SafeFileHandle source, Action<int>? read, CancellationToken token) : SequentialStream
 {
     private readonly IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
     public long ReadBytes { get; private set; }
@@ -94,7 +96,7 @@ internal sealed class HashingFileStream(SafeFileHandle source, Action<int> read,
         int size = RandomAccess.Read(source, buffer, ReadBytes);
         ReadBytes += size;
         hash.AppendData(buffer[..size]);
-        read(size);
+        read?.Invoke(size);
         return size;
     }
 

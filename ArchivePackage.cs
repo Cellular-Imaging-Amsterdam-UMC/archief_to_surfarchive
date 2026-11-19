@@ -118,10 +118,15 @@ internal static class ArchivePackage
             ArchivePart[] parts;
             try
             {
-                var volumes = WriteZip(folder, archiveName, plan, hashes, originals, partLimit, report, token,
-                    part => channel.Writer.TryWrite(part));
-                frozen.HoldParts(folder, volumes);
-                VerifyZip(plan, volumes, frozen, hashes, report, token);
+                ArchivePart[] volumes;
+                using (var codec = new ZipBlockCodec(token))
+                {
+                    var written = WriteZip(folder, archiveName, plan, hashes, originals, partLimit, report, token,
+                        part => channel.Writer.TryWrite(part), codec);
+                    volumes = written.Parts;
+                    frozen.HoldParts(folder, volumes);
+                    VerifyZip(plan, volumes, frozen, hashes, written.Entries, codec, report, token);
+                }
                 var contents = PackageContents.Write(folder, archiveName, plan, volumes, options.Retention, report, token, frozen.Hold);
                 parts = [.. volumes, .. contents];
                 SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName,
@@ -226,8 +231,9 @@ internal static class ArchivePackage
         FinishFolder(folder);
     }
 
-    private static ArchivePart[] WriteZip(string folder, string archiveName, PackagePlan plan, Dictionary<string, string> hashes,
-        VerifiedFiles? originals, long partLimit, Action<PackageMeter> report, CancellationToken token, Action<ArchivePart> sealedVolume)
+    private static (ArchivePart[] Parts, IReadOnlyList<ZipEntryIndex> Entries) WriteZip(string folder, string archiveName,
+        PackagePlan plan, Dictionary<string, string> hashes, VerifiedFiles? originals, long partLimit,
+        Action<PackageMeter> report, CancellationToken token, Action<ArchivePart> sealedVolume, ZipBlockCodec codec)
     {
         bool countItems = plan.Bytes == 0;
         long total = countItems ? plan.Entries.Count : plan.Bytes, done = 0;
@@ -237,63 +243,59 @@ internal static class ArchivePackage
             .ToHashSet(StringComparer.Ordinal);
         report(new(PackageStep.Archive, 0, total, countItems));
         using var volumes = new VolumeWriter(folder, archiveName, partLimit, sealedVolume);
-        using (var zip = new ZipArchive(volumes, ZipArchiveMode.Create, leaveOpen: true, entryNameEncoding: Encoding.UTF8))
+        using var zip = new SplitZipWriter(volumes, codec, token);
+        foreach (var item in plan.Entries)
         {
-            foreach (var item in plan.Entries)
+            token.ThrowIfCancellationRequested();
+            var attributes = PackageFiles.GetRegularAttributes(item.Path);
+            if (attributes.HasFlag(FileAttributes.Directory) != item.IsDirectory)
+                throw new IOException($"The source changed while packing: {item.Path}");
+            PackageFiles.EnsureDefaultDataStream(item.Path);
+            if (item.IsDirectory)
             {
-                token.ThrowIfCancellationRequested();
-                var attributes = PackageFiles.GetRegularAttributes(item.Path);
-                if (attributes.HasFlag(FileAttributes.Directory) != item.IsDirectory)
-                    throw new IOException($"The source changed while packing: {item.Path}");
-                PackageFiles.EnsureDefaultDataStream(item.Path);
-                var entry = zip.CreateEntry(item.Name, item.IsDirectory ? CompressionLevel.NoCompression : CompressionLevel.Optimal);
-                var modified = new DateTimeOffset(item.Modified).ToLocalTime();
-                if (modified.Year is >= 1980 and <= 2107)
-                    entry.LastWriteTime = modified;
-                if (item.IsDirectory)
-                {
-                    entry.ExternalAttributes = (int)FileAttributes.Directory;
-                    if (countItems)
-                        report(new(PackageStep.Archive, ++done, total, countItems));
-                    continue;
-                }
-
-                bool keep = protect?.Contains(item.Name) == true;
-                var share = keep ? FileShare.Read | FileShare.Delete : FileShare.Read;
-                SafeFileHandle? input = File.OpenHandle(item.Path, FileMode.Open, FileAccess.Read, share, FileOptions.SequentialScan);
-                try
-                {
-                    PackageFiles.CheckSource(item, input);
-                    using var checker = new HashingFileStream(input,
-                        count => report(new(PackageStep.Archive, done += count, total)), token);
-                    using (var output = entry.Open())
-                        checker.CopyTo(output, 1 << 20);
-                    if (checker.ReadBytes != item.Size)
-                        throw new IOException($"The source was not fully copied: {item.Path}");
-                    hashes.Add(item.Name, checker.Finish());
-                    if (keep)
-                    {
-                        originals!.Hold(item.Name, input);
-                        input = null;
-                    }
-                }
-                finally { input?.Dispose(); }
+                zip.Write(item, null, Count);
                 if (countItems)
-                    report(new(PackageStep.Archive, ++done, total, countItems));
+                    Count(1);
+                continue;
             }
+
+            bool keep = protect?.Contains(item.Name) == true;
+            var share = keep ? FileShare.Read | FileShare.Delete : FileShare.Read;
+            SafeFileHandle? input = File.OpenHandle(item.Path, FileMode.Open, FileAccess.Read, share, FileOptions.SequentialScan);
+            try
+            {
+                PackageFiles.CheckSource(item, input);
+                using var checker = new HashingFileStream(input, null, token);
+                zip.Write(item, checker, Count);
+                if (checker.ReadByte() != -1 || checker.ReadBytes != item.Size)
+                    throw new IOException($"The source changed while packing: {item.Path}");
+                hashes.Add(item.Name, checker.Finish());
+                if (keep)
+                {
+                    originals!.Hold(item.Name, input);
+                    input = null;
+                }
+            }
+            finally { input?.Dispose(); }
+            if (countItems)
+                Count(1);
         }
+        var entries = zip.Finish();
         var parts = volumes.Finish();
         report(new(PackageStep.Archive, total, total, countItems, Finished: true));
-        return parts;
+        return (parts, entries);
+
+        void Count(int bytes) => report(new(PackageStep.Archive, done += bytes, total, countItems));
     }
 
     private static void VerifyZip(PackagePlan plan, ArchivePart[] parts, VerifiedFiles frozen,
-        Dictionary<string, string> hashes, Action<PackageMeter> report, CancellationToken token)
+        Dictionary<string, string> hashes, IReadOnlyList<ZipEntryIndex> index, ZipBlockCodec codec,
+        Action<PackageMeter> report, CancellationToken token)
     {
         long total = checked(parts.Sum(part => part.Size) + plan.Bytes), done = 0;
         report(new(PackageStep.Verify, 0, total));
         using var volumes = new ZipVolumeReader(parts, frozen.Get, token);
-        using var zip = new ZipArchive(volumes, ZipArchiveMode.Read);
+        using var zip = new ZipArchive(volumes, ZipArchiveMode.Read, leaveOpen: true);
         if (zip.Entries.Count != plan.Entries.Count)
             throw new IOException("The ZIP archive has an unexpected number of entries.");
         // ZipArchive reads the central directory first. Start sequential part checks as entry decoding begins.
@@ -304,15 +306,25 @@ internal static class ArchivePackage
             token.ThrowIfCancellationRequested();
             var expected = plan.Entries[i];
             var entry = zip.Entries[i];
-            if (entry.FullName != expected.Name || entry.Length != expected.Size)
+            var record = index[i];
+            if (entry.FullName != expected.Name || entry.Length != expected.Size ||
+                entry.CompressedLength != record.CompressedSize || entry.Crc32 != record.Crc32)
                 throw new IOException($"Could not verify ZIP entry {expected.Name}.");
-            if (!expected.IsDirectory)
+            using var data = entry.Open();
+            if (expected.IsDirectory)
+                continue;
+            string digest;
+            if (record.Blocks is { } blocks)
             {
-                using var data = entry.Open();
-                string digest = PackageFiles.Hash(data, buffer, token, Count);
-                if (digest != hashes[expected.Name])
-                    throw new IOException($"The ZIP contents do not match {expected.Name}.");
+                volumes.Position = record.DataOffset;
+                digest = codec.Verify(volumes, expected.Size, blocks, Count);
+                if (volumes.Position != record.DataOffset + record.CompressedSize)
+                    throw new IOException($"The ZIP entry length does not match {expected.Name}.");
             }
+            else
+                digest = PackageFiles.Hash(data, buffer, token, Count);
+            if (digest != hashes[expected.Name])
+                throw new IOException($"The ZIP contents do not match {expected.Name}.");
         }
         volumes.CompleteVerification();
         report(new(PackageStep.Verify, total, total, Finished: true));

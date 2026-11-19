@@ -1080,8 +1080,8 @@ internal sealed class MainWindow : Form
 
     private static (string Caption, string Working, string Detail, bool ShowRate) DescribeStep(PackageStep step) => step switch
     {
-        PackageStep.Archive => ("Compress source", "Compressing", "Source data read for compression.", true),
-        PackageStep.Verify => ("Check local archive", "Checking", "Checks every archive part. New archives also compare all decoded ZIP contents with the source files.", true),
+        PackageStep.Archive => ("Compress source", "Compressing", "Compresses large files with up to eight workers.", true),
+        PackageStep.Verify => ("Check local archive", "Checking", "Checks every archive part. For new archives, decodes large files in parallel and checks the SHA-256 of every complete file against its source.", true),
         PackageStep.Index => ("Write archive metadata", "Writing", "Items indexed for the contents files. Also writes retention.json.", false),
         PackageStep.RemoveOriginals => ("Remove originals", "Removing", "Originals are removed after all SURF SHA-256 checks pass.", false),
         PackageStep.Upload => ("Upload to SURF", "Uploading", "Completed parts upload during packing. The final size includes compressed parts and metadata.", true),

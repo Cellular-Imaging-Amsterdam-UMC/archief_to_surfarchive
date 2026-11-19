@@ -18,6 +18,12 @@
           "Microsoft.Extensions.Logging.Abstractions": "8.0.3"
         }
       },
+      "System.IO.Hashing": {
+        "type": "Direct",
+        "requested": "[10.0.15, )",
+        "resolved": "10.0.15",
+        "contentHash": "8dyz8adVemyDILwoEFTCq2NsB6XgqOgVHbnv0XgnttQac76XUR3S5L2qcIkJJqOw97mjQttCTWccyk4DKtfm3Q=="
+      },
       "BouncyCastle.Cryptography": {
         "type": "Transitive",
         "resolved": "2.7.0",
