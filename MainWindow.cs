@@ -21,7 +21,6 @@ internal sealed class MainWindow : Form
     private readonly Button newFolder = DarkTheme.Button("New folder", ActionIcon.FolderPlus);
     private readonly Label connection = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
     private readonly Label feedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
-    private readonly Label scanFeedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
     private readonly Button cancelScan = DarkTheme.Button("Cancel scan", ActionIcon.Cancel);
     private readonly System.Windows.Forms.Timer scanTimer = new() { Interval = 200 };
     private readonly List<ActiveArchiveScan> archiveScans = [];
@@ -39,6 +38,8 @@ internal sealed class MainWindow : Form
     private bool transferring;
     private bool editingSurf;
     private bool closeWhenIdle;
+    private string feedbackMessage = "";
+    private bool feedbackIsError;
 
     public MainWindow(ArchiveSession? session)
     {
@@ -189,16 +190,14 @@ internal sealed class MainWindow : Form
             Margin = new Padding(14, 2, 13, 2) };
         statusBar.ColumnStyles.Add(new(SizeType.Percent, 100));
         statusBar.ColumnStyles.Add(new(SizeType.AutoSize));
-        var statusText = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty };
-        foreach (var label in new[] { feedback, scanFeedback })
-        {
-            label.AutoSize = false;
-            label.AutoEllipsis = true;
-            label.TextAlign = ContentAlignment.MiddleLeft;
-            label.Dock = DockStyle.Fill;
-            statusText.Controls.Add(label);
-        }
-        statusBar.Controls.Add(statusText, 0, 0);
+        statusBar.RowStyles.Add(new(SizeType.Percent, 100));
+        feedback.AutoSize = false;
+        feedback.AutoEllipsis = true;
+        feedback.UseMnemonic = false;
+        feedback.TextAlign = ContentAlignment.MiddleLeft;
+        feedback.Dock = DockStyle.Fill;
+        feedback.Margin = Padding.Empty;
+        statusBar.Controls.Add(feedback, 0, 0);
         statusBar.Controls.Add(cancelScan, 1, 0);
         layout.Controls.Add(statusBar, 0, 5);
     }
@@ -221,17 +220,20 @@ internal sealed class MainWindow : Form
     {
         var active = archiveScans.LastOrDefault();
         scanTimer.Enabled = active is not null;
-        feedback.Visible = active is null;
-        scanFeedback.Visible = active is not null;
         cancelScan.Visible = active is not null && active.Clock.Elapsed >= TimeSpan.FromSeconds(10);
         cancelScan.Enabled = active is not null && !active.Cancellation.IsCancellationRequested;
         if (active is null)
+        {
+            feedback.Text = feedbackMessage;
+            feedback.ForeColor = feedbackIsError ? DarkTheme.Error : DarkTheme.Muted;
             return;
+        }
         var (phase, files, folders, bytes) = active.Progress.Read();
         string label = active.Cancellation.IsCancellationRequested ? "Cancelling scan…" : phase;
         if (label.Length > 52)
             label = label[..51] + "…";
-        scanFeedback.Text = $"{label}  ·  {files + folders:N0} items ({files:N0} files, {folders:N0} folders)" +
+        feedback.ForeColor = DarkTheme.Mint;
+        feedback.Text = $"{label}  ·  {files + folders:N0} items ({files:N0} files, {folders:N0} folders)" +
             $"  ·  {TransferJob.FormatBytes(bytes)}  ·  {TransferJob.FormatTime(active.Clock.Elapsed)}";
     }
 
@@ -1383,7 +1385,7 @@ internal sealed class MainWindow : Form
         try
         {
             await work(token.Token);
-            if (feedback.Text == "Loading…")
+            if (feedbackMessage == "Loading…")
                 SetFeedback("");
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -1492,8 +1494,10 @@ internal sealed class MainWindow : Form
 
     private void SetFeedback(string text, bool error = false)
     {
-        feedback.Text = text;
-        feedback.ForeColor = error ? DarkTheme.Error : DarkTheme.Muted;
+        feedbackMessage = text;
+        feedbackIsError = error;
+        if (archiveScans.Count == 0)
+            RefreshScanStatus();
     }
 
     private sealed record RestoreActivity(TransferJob Job, RestorePolling Polling, CancellationTokenSource Cancellation);

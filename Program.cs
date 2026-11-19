@@ -11,9 +11,13 @@ internal static class Program
         CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.GetCultureInfo("en-GB");
         ApplicationConfiguration.Initialize();
 
-        var session = SignInAtStartup();
-        if (session is null)
-            return 0;
+        ArchiveSession session;
+        using (var login = new LoginDialog())
+        {
+            if (login.ShowDialog() != DialogResult.OK)
+                return 0;
+            session = login.TakeSession();
+        }
 
         if (args is ["--proef" or "--probe", var source, var logPath])
         {
@@ -22,34 +26,6 @@ internal static class Program
         }
         Application.Run(new MainWindow(session));
         return 0;
-    }
-
-    private static ArchiveSession? SignInAtStartup()
-    {
-        using var splash = new StartupSplash();
-        ArchiveSession? session = null;
-        splash.Shown += async (_, _) =>
-        {
-            try
-            {
-                // Give a warm launch enough time to paint the splash without leaving it over the sign-in window.
-                var minimumDisplay = Task.Delay(350);
-                using var login = new LoginDialog();
-                await minimumDisplay;
-                if (splash.IsDisposed)
-                    return;
-                login.Shown += (_, _) => splash.Hide();
-                if (login.ShowDialog() == DialogResult.OK)
-                    session = login.TakeSession();
-            }
-            finally
-            {
-                if (!splash.IsDisposed)
-                    splash.Close();
-            }
-        };
-        Application.Run(splash);
-        return session;
     }
 
     private static int RunProbe(ArchiveSession archive, string source, string logPath)
