@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -6,9 +7,28 @@ namespace SurfArchive;
 
 internal enum ArchiveQueueState { Queued, Paused, Running, Finished, Failed, Cancelled, Interrupted }
 
+internal sealed record ArchiveQueueProgress(int Completed, int Total, TimeSpan Elapsed)
+{
+    [JsonIgnore]
+    public long? StartedAt { get; init; }
+
+    [JsonIgnore]
+    public TimeSpan CurrentElapsed => StartedAt is { } started ? Elapsed + Stopwatch.GetElapsedTime(started) : Elapsed;
+
+    public static ArchiveQueueProgress Start(int total, TimeSpan elapsed = default) =>
+        new(0, total, elapsed) { StartedAt = Stopwatch.GetTimestamp() };
+
+    public ArchiveQueueProgress Checkpoint(int completed, bool keepRunning) => this with
+    {
+        Completed = Math.Clamp(completed, Completed, Total),
+        Elapsed = CurrentElapsed,
+        StartedAt = keepRunning ? Stopwatch.GetTimestamp() : null
+    };
+}
+
 internal sealed record ArchiveQueueItem(string LocalName, string Name, string Source, string Parent, ArchiveEntry[] Selection,
     string SourceHash, PackageOptions Options, ArchiveQueueState State = ArchiveQueueState.Queued,
-    string? RecoveryPath = null, string? Detail = null)
+    string? RecoveryPath = null, string? Detail = null, ArchiveQueueProgress? Progress = null)
 {
     [JsonIgnore]
     public string RemotePath => ArchiveSession.Child(Parent, Name);
@@ -52,6 +72,8 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
 
 internal sealed class ArchiveQueue : IDisposable
 {
+    public static int ArchiveSteps { get; } = Enum.GetValues<PackageStep>().Length;
+    private const int RecoverySteps = 4;
     private List<ArchiveQueueItem> items = [];
     private ArchiveQueueStore? store;
     public IReadOnlyList<ArchiveQueueItem> Items => items;
@@ -95,7 +117,7 @@ internal sealed class ArchiveQueue : IDisposable
         var next = items.Find(item => item.State == ArchiveQueueState.Queued);
         if (next is null)
             return null;
-        var running = next with { State = ArchiveQueueState.Running };
+        var running = next with { State = ArchiveQueueState.Running, Progress = ArchiveQueueProgress.Start(ArchiveSteps) };
         Replace(next, running);
         return running;
     }
@@ -114,13 +136,29 @@ internal sealed class ArchiveQueue : IDisposable
             || items.Any(other => other.State == ArchiveQueueState.Running))
             throw new IOException("This queue item is no longer available for recovery.");
         CheckDestinations([item.RemotePath]);
-        Replace(item, item with { State = ArchiveQueueState.Running, RecoveryPath = folder, Detail = null });
+        Replace(item, item with
+        {
+            State = ArchiveQueueState.Running, RecoveryPath = folder, Detail = null,
+            Progress = ArchiveQueueProgress.Start(RecoverySteps, item.Progress?.CurrentElapsed ?? TimeSpan.Zero)
+        });
+    }
+
+    public void CompleteSteps(string localName, int completed)
+    {
+        var current = items.Find(item => item.LocalName == localName && item.State == ArchiveQueueState.Running);
+        if (current?.Progress is { } progress && completed > progress.Completed)
+            Replace(current, current with { Progress = progress.Checkpoint(completed, keepRunning: true) });
     }
 
     public void Finish(string localName, ArchiveQueueState state, string? detail = null)
     {
         if (items.Find(item => item.LocalName == localName) is { } current)
-            Replace(current, current with { State = state, Detail = detail });
+        {
+            var progress = current.Progress;
+            if (progress is not null)
+                progress = progress.Checkpoint(state == ArchiveQueueState.Finished ? progress.Total : progress.Completed, keepRunning: false);
+            Replace(current, current with { State = state, Detail = detail, Progress = progress });
+        }
     }
 
     public void Remove(ArchiveQueueItem item)

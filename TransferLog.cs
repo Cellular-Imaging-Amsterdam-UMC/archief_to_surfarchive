@@ -152,9 +152,12 @@ internal record TransferSnapshot(TransferState State, long Copied, long Total, d
 
 internal sealed class TransferLog : UserControl
 {
+    private const int HeadingHeight = 32;
+    private const int VisibleRows = 4;
+    public const int DisplayHeight = 16 + HeadingHeight + 6 +
+        ActivityGrid.HeaderHeight + VisibleRows * ActivityGrid.ItemHeight;
     private readonly ActivityGrid jobs = new() { AccessibleName = "Activity" };
     private readonly Label summary = DarkTheme.Label("No activity yet", DarkTheme.Small, DarkTheme.Muted);
-    private readonly TextBox details = DarkTheme.Input("Transfer details and archive status");
     private readonly Button cancel = DarkTheme.Button("Cancel activity", ActionIcon.Cancel);
     private readonly List<string> activity = [];
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 300 };
@@ -165,10 +168,9 @@ internal sealed class TransferLog : UserControl
         Dock = DockStyle.Fill;
         BackColor = DarkTheme.Panel;
         Padding = new Padding(12, 8, 12, 8);
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1, Margin = Padding.Empty };
-        layout.RowStyles.Add(new(SizeType.Absolute, 32));
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = Padding.Empty };
+        layout.RowStyles.Add(new(SizeType.Absolute, HeadingHeight));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
-        layout.RowStyles.Add(new(SizeType.Absolute, 61));
         Controls.Add(layout);
         var heading = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 1, ColumnCount = 2, Margin = Padding.Empty };
         heading.ColumnStyles.Add(new(SizeType.Percent, 100));
@@ -181,26 +183,17 @@ internal sealed class TransferLog : UserControl
         cancel.Enabled = false;
         layout.Controls.Add(heading, 0, 0);
         layout.Controls.Add(jobs, 0, 1);
-        layout.Controls.Add(details, 0, 2);
-        details.Multiline = true;
-        details.ReadOnly = true;
-        details.WordWrap = false;
-        details.ScrollBars = ScrollBars.Both;
-        details.Dock = DockStyle.Fill;
-        details.Margin = new Padding(0, 5, 0, 0);
-        DarkTheme.Explorer(details);
 
         jobs.AddTextColumn("File or archive", 210, fill: true);
         jobs.AddTextColumn("Action", 161);
         jobs.AddTextColumn("Status", 121);
-        jobs.AddTextColumn("Progress", 131);
+        jobs.AddProgressColumn(131);
         jobs.AddTextColumn("Processed", 135);
         jobs.AddTextColumn("Speed", 83);
         jobs.AddTextColumn("ETA", 68);
         jobs.AddTextColumn("Copy time", 88);
         jobs.AddTextColumn("Elapsed", 75);
-        jobs.CellPainting += PaintProgress;
-        jobs.SelectionChanged += (_, _) => { ShowDetails(); SelectionChanged?.Invoke(); };
+        jobs.SelectionChanged += (_, _) => SelectionChanged?.Invoke();
         timer.Tick += (_, _) =>
         {
             foreach (var row in activeRows.Values)
@@ -211,11 +204,17 @@ internal sealed class TransferLog : UserControl
 
     public event Action? CancelRequested;
     public event Action? SelectionChanged;
+    public event EventHandler? HorizontalScrollbarChanged
+    {
+        add => jobs.HorizontalScrollbarChanged += value;
+        remove => jobs.HorizontalScrollbarChanged -= value;
+    }
+    public int HorizontalScrollbarHeight => jobs.HorizontalScrollbarHeight;
     public TransferJob? SelectedJob => jobs.CurrentRow?.Tag as TransferJob;
 
     public void Add(TransferJob job)
     {
-        var row = new DataGridViewRow { Tag = job };
+        var row = new DataGridViewRow { Tag = job, Height = jobs.RowTemplate.Height };
         row.CreateCells(jobs, job.Name, job.Direction);
         jobs.Rows.Insert(0, row);
         jobs.ClearSelection();
@@ -225,7 +224,6 @@ internal sealed class TransferLog : UserControl
         activeRows.Add(job, row);
         UpdateRow(row);
         UpdateSummary();
-        ShowDetails(job);
     }
 
     public void Finish(TransferJob job, TransferState state)
@@ -234,7 +232,6 @@ internal sealed class TransferLog : UserControl
         if (activeRows.Remove(job, out var row))
             UpdateRow(row);
         UpdateSummary();
-        ShowDetails();
     }
 
     public void SetCancel(string caption, bool enabled)
@@ -254,20 +251,6 @@ internal sealed class TransferLog : UserControl
         }
         else
             activity.Add(line);
-        if (job is null || job == SelectedJob)
-            ShowDetails();
-    }
-
-    private void ShowDetails(TransferJob? preferred = null)
-    {
-        var selected = preferred ?? jobs.CurrentRow?.Tag as TransferJob;
-        details.Text = string.Join(Environment.NewLine, activity.TakeLast(6)
-            .Concat(selected?.Notes ?? []));
-        if (!details.Focused)
-        {
-            details.SelectionStart = details.TextLength;
-            details.ScrollToCaret();
-        }
     }
 
     private void UpdateSummary() => summary.Text = jobs.Rows.Count switch
@@ -318,23 +301,6 @@ internal sealed class TransferLog : UserControl
         row.Cells[7].Value = job.Working is null && snapshot.CopyTime is { } copy ? TransferJob.FormatTime(copy) : "—";
         row.Cells[8].Value = TransferJob.FormatTime(snapshot.Elapsed);
         string Format(double value) => job.CountItems ? $"{value:N0} items" : TransferJob.FormatBytes(value);
-    }
-
-    private void PaintProgress(object? sender, DataGridViewCellPaintingEventArgs e)
-    {
-        if (e.RowIndex < 0 || e.ColumnIndex != 3 || e.Value is not int percent || e.Graphics is null)
-            return;
-        e.Paint(e.CellBounds, DataGridViewPaintParts.Background | DataGridViewPaintParts.SelectionBackground | DataGridViewPaintParts.Border);
-        var bar = new Rectangle(e.CellBounds.X + 8, e.CellBounds.Y + (e.CellBounds.Height - 6) / 2,
-            Math.Max(0, e.CellBounds.Width - 50), 6);
-        using var track = new SolidBrush(DarkTheme.Border);
-        using var fill = new SolidBrush(DarkTheme.Mint);
-        e.Graphics.FillRectangle(track, bar);
-        e.Graphics.FillRectangle(fill, new Rectangle(bar.X, bar.Y, bar.Width * percent / 100, bar.Height));
-        var label = new Rectangle(bar.Right + 2, e.CellBounds.Y, 36, e.CellBounds.Height);
-        TextRenderer.DrawText(e.Graphics, $"{percent}%", DarkTheme.Small, label, DarkTheme.Ink,
-            TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
-        e.Handled = true;
     }
 
     protected override void Dispose(bool disposing)

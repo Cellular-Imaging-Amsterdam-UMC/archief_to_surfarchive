@@ -106,6 +106,7 @@ internal static class DarkTheme
         {
             this.icon = icon;
             this.primary = primary;
+            Font = Small;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             MinimumSize = new Size(0, 26);
@@ -161,7 +162,7 @@ internal static class DarkTheme
             using var border = new Pen(Border);
             e.Graphics.DrawRectangle(border, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
             var bitmap = Image!;
-            const TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
+            const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter;
             int textWidth = Text.Length > 0 ? TextRenderer.MeasureText(e.Graphics, Text, Font, Size.Empty, flags).Width : 0;
             int gap = textWidth > 0 ? 4 : 0;
             int start = (ClientSize.Width - bitmap.Width - gap - textWidth) / 2;
@@ -169,8 +170,8 @@ internal static class DarkTheme
             if (textWidth > 0)
             {
                 int textLeft = start + bitmap.Width + gap;
-                TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(textLeft, 0, ClientSize.Width - textLeft,
-                    ClientSize.Height), Muted, flags);
+                TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(textLeft, 1, ClientSize.Width - textLeft,
+                    Math.Max(0, ClientSize.Height - 2)), Muted, flags);
             }
         }
 

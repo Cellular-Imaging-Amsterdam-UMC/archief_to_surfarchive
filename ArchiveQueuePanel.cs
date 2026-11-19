@@ -3,17 +3,21 @@ namespace SurfArchive;
 internal sealed class ArchiveQueuePanel : UserControl
 {
     public const int EmptyHeight = 52;
-    private const int RunColumn = 3;
-    private const int RemoveColumn = 4;
+    private const int ProgressColumn = 3;
+    private const int TimeColumn = 4;
+    private const int RunColumn = 5;
+    private const int RemoveColumn = 6;
     private readonly ActivityGrid jobs = new() { AccessibleName = "Archive queue items" };
     private readonly Label summary = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private readonly Button removeFinished = DarkTheme.Button("Remove all finished", ActionIcon.Trash);
     private readonly ToolStripMenuItem browseRecovery = new("Choose recovery folder…");
+    private readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     private readonly ContextMenuStrip queueMenu = new()
     {
         BackColor = DarkTheme.Raised, ForeColor = DarkTheme.Ink, Font = DarkTheme.Small, ShowImageMargin = false
     };
     private bool recoveryAvailable;
+    private DataGridViewRow? runningRow;
 
     public ArchiveQueuePanel()
     {
@@ -43,6 +47,8 @@ internal sealed class ArchiveQueuePanel : UserControl
         jobs.AddTextColumn("Archive", 210, fill: true);
         jobs.AddTextColumn("SURF destination", 280, fill: true);
         jobs.AddTextColumn("Status", 121);
+        jobs.AddProgressColumn(131);
+        jobs.AddTextColumn("Total time", 90);
         AddActionColumn();
         AddActionColumn();
         jobs.CellMouseClick += (_, e) =>
@@ -56,6 +62,11 @@ internal sealed class ArchiveQueuePanel : UserControl
                 InvokeAction(cell.RowIndex, cell.ColumnIndex))
                 e.Handled = e.SuppressKeyPress = true;
         };
+        timer.Tick += (_, _) =>
+        {
+            if (runningRow?.Tag is ArchiveQueueItem item)
+                runningRow.Cells[TimeColumn].Value = FormatElapsed(item);
+        };
         ShowItems([]);
     }
 
@@ -64,9 +75,16 @@ internal sealed class ArchiveQueuePanel : UserControl
     public event Action? RemoveFinished;
     public event Action<ArchiveQueueItem>? ResumeUpload;
     public event Action? BrowseRecovery;
+    public event EventHandler? HorizontalScrollbarChanged
+    {
+        add => jobs.HorizontalScrollbarChanged += value;
+        remove => jobs.HorizontalScrollbarChanged -= value;
+    }
+
+    public int HorizontalScrollbarHeight => jobs.HorizontalScrollbarHeight;
 
     public static int HeightFor(int count) => count == 0 ? EmptyHeight
-        : EmptyHeight + ActivityGrid.HeaderHeight + ActivityGrid.ItemHeight * Math.Min(count, 3) + 8;
+        : EmptyHeight + ActivityGrid.HeaderHeight + ActivityGrid.ItemHeight * Math.Min(count, 4) + 6;
 
     public void SetRecoveryAvailable(bool available)
     {
@@ -91,16 +109,25 @@ internal sealed class ArchiveQueuePanel : UserControl
         int column = jobs.CurrentCell?.ColumnIndex ?? 0;
         int top = jobs.FirstDisplayedScrollingRowIndex;
         DataGridViewRow? selection = null;
+        runningRow = null;
         jobs.SuspendLayout();
         jobs.Rows.Clear();
         foreach (var item in items)
         {
-            var row = jobs.Rows[jobs.Rows.Add(item.Name, item.RemotePath, item.State.ToString())];
+            var progress = item.Progress;
+            int totalSteps = progress?.Total ?? ArchiveQueue.ArchiveSteps;
+            int steps = item.State == ArchiveQueueState.Finished ? totalSteps : progress?.Completed ?? 0;
+            int percent = (int)(100L * steps / totalSteps);
+            var row = jobs.Rows[jobs.Rows.Add(item.Name, item.RemotePath, item.State.ToString(), percent, FormatElapsed(item))];
             row.Tag = item;
+            if (item.State == ArchiveQueueState.Running)
+                runningRow = row;
             if (item.LocalName == selectedId)
                 selection = row;
             row.Cells[0].ToolTipText = item.Source;
             row.Cells[1].ToolTipText = item.RemotePath;
+            row.Cells[ProgressColumn].ToolTipText = $"{steps} of {totalSteps} steps complete";
+            row.Cells[TimeColumn].ToolTipText = "Total running time, including waits during the job";
             row.Cells[2].ToolTipText = string.Join(Environment.NewLine,
                 new[] { item.Detail, item.RecoveryPath is { } path && item.State is ArchiveQueueState.Interrupted
                     or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled ? $"Local package: {path}" : null }
@@ -126,7 +153,11 @@ internal sealed class ArchiveQueuePanel : UserControl
             jobs.CurrentCell = selection.Cells[column];
         if (top >= 0 && jobs.Rows.Count > 0 && jobs.Visible)
             jobs.FirstDisplayedScrollingRowIndex = Math.Min(top, jobs.Rows.Count - 1);
+        timer.Enabled = runningRow is not null;
     }
+
+    private static string FormatElapsed(ArchiveQueueItem item) =>
+        item.Progress is { } progress ? TransferJob.FormatTime(progress.CurrentElapsed) : "—";
 
     private void AddActionColumn() => jobs.Columns.Add(new DataGridViewImageColumn
     {
@@ -167,7 +198,10 @@ internal sealed class ArchiveQueuePanel : UserControl
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
+            timer.Dispose();
             queueMenu.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

@@ -8,6 +8,7 @@ internal sealed class MainWindow : Form
     private readonly ArchiveQueue archiveQueue = new();
     private readonly ArchiveQueuePanel queuePanel = new();
     private readonly RowStyle queueHeight = new(SizeType.Absolute, ArchiveQueuePanel.EmptyHeight);
+    private readonly RowStyle activityHeight = new(SizeType.Absolute, TransferLog.DisplayHeight);
     private readonly Button signIn = DarkTheme.Button("Sign out", ActionIcon.SignOut);
     private readonly Button upload = DarkTheme.Button("Upload to SURF", ActionIcon.Upload, primary: true);
     private readonly Button download = DarkTheme.Button("Download", ActionIcon.Download, primary: true);
@@ -24,7 +25,13 @@ internal sealed class MainWindow : Form
     private CancellationTokenSource? statusLookup;
     private readonly Dictionary<string, RestoreActivity> restores = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim retentionEditor = new(1);
+    private string[] copySurfPaths = [];
+    private string? packageSurfPath;
+    private ArchiveRequest? pendingSourceRefresh;
+    private int localListingVersion;
+    private int surfListingVersion;
     private bool transferring;
+    private bool editingSurf;
     private bool closeWhenIdle;
 
     public MainWindow(ArchiveSession? session)
@@ -65,13 +72,16 @@ internal sealed class MainWindow : Form
         removeSurf.Click += async (_, _) => await ConfirmRemoval(local: false);
         removeWindows.AccessibleName = "Remove selected Local / NAS items";
         removeSurf.AccessibleName = "Remove selected SURF items";
-        newFolder.Click += async (_, _) => await Run(MakeFolder);
+        newFolder.Click += async (_, _) => await MakeFolder();
         transfers.CancelRequested += CancelSelectedActivity;
         transfers.SelectionChanged += UpdateControls;
+        transfers.HorizontalScrollbarChanged += (_, _) => SchedulePanelResize();
+        queuePanel.HorizontalScrollbarChanged += (_, _) => SchedulePanelResize();
+        SizeChanged += (_, _) => SchedulePanelResize();
         archiveQueue.Changed += () =>
         {
             queuePanel.ShowItems(archiveQueue.Items);
-            queueHeight.Height = ArchiveQueuePanel.HeightFor(archiveQueue.Items.Count) * DeviceDpi / 96f;
+            FitActivityPanels();
         };
         queuePanel.TogglePause += item =>
         {
@@ -94,13 +104,35 @@ internal sealed class MainWindow : Form
         UpdateControls();
     }
 
+    private void SchedulePanelResize()
+    {
+        // Scrollbar visibility can change while the grid is laying out its rows.
+        if (IsHandleCreated && !IsDisposed)
+            BeginInvoke(FitActivityPanels);
+    }
+
+    private void FitActivityPanels()
+    {
+        if (IsDisposed)
+            return;
+        float scale = DeviceDpi / 96f;
+        float queue = (float)Math.Round(ArchiveQueuePanel.HeightFor(archiveQueue.Items.Count) * scale) +
+            queuePanel.HorizontalScrollbarHeight;
+        float activity = (float)Math.Round(TransferLog.DisplayHeight * scale) + transfers.HorizontalScrollbarHeight;
+        if (queueHeight.Height == queue && activityHeight.Height == activity)
+            return;
+        queueHeight.Height = queue;
+        activityHeight.Height = activity;
+        transfers.Parent?.PerformLayout();
+    }
+
     private void BuildLayout()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty };
         foreach (int height in new[] { 38, -1, 35 })
             layout.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
         layout.RowStyles.Add(queueHeight);
-        layout.RowStyles.Add(new(SizeType.Absolute, 205));
+        layout.RowStyles.Add(activityHeight);
         layout.RowStyles.Add(new(SizeType.Absolute, 25));
         Controls.Add(layout);
 
@@ -180,36 +212,48 @@ internal sealed class MainWindow : Form
 
     private async Task NavigateLocal(string path, string? root)
     {
+        int version = ++localListingVersion;
         try
         {
             string full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
             var entries = await Task.Run(() => LocalFiles.List(full));
-            windows.ShowFolder(full, root, entries);
+            if (!closeWhenIdle && version == localListingVersion)
+                windows.ShowFolder(full, root, entries);
         }
         catch
         {
-            windows.RestoreLocation();
+            if (!closeWhenIdle && version == localListingVersion)
+                windows.RestoreLocation();
             throw;
         }
     }
 
-    private async Task NavigateRemote(string path, string? root)
+    private async Task NavigateRemote(string path, string? root, bool independent = false)
     {
+        var session = archive!;
+        int version = ++surfListingVersion;
         try
         {
-            var entries = await Task.Run(() => archive!.List(path));
+            var entries = await Task.Run(() => independent ? session.ListIndependent(path) : session.List(path));
+            if (version != surfListingVersion || session != archive || closeWhenIdle)
+                return;
             surf.ShowFolder(path, root, entries);
             _ = LoadArchiveStatuses(path, entries.ToArray());
         }
         catch
         {
-            surf.RestoreLocation();
+            if (!closeWhenIdle && version == surfListingVersion && session == archive)
+                surf.RestoreLocation();
             throw;
         }
     }
 
     private async Task OpenRecent(RecentFolder folder, bool local)
     {
+        if (local)
+            localListingVersion++;
+        else
+            surfListingVersion++;
         BrowserPane pane = local ? windows : surf;
         string root;
         string[] parts;
@@ -390,25 +434,30 @@ internal sealed class MainWindow : Form
 
     private async Task Copy(bool toSurf, CancellationToken token)
     {
+        var items = toSurf ? windows.SelectedFiles : surf.SelectedItems;
+        string remoteDirectory = surf.PathShown;
+        copySurfPaths = items.Select(item => ArchiveSession.Child(remoteDirectory, item.Name)).ToArray();
+        UpdateControls();
         if (!toSurf)
             StopStatusLookup();
         try
         {
-            await CopySelection(toSurf, token);
+            await CopySelection(toSurf, items, token);
         }
         finally
         {
+            copySurfPaths = [];
             if (!toSurf && !closeWhenIdle && surf.HasFolder)
                 _ = LoadArchiveStatuses(surf.PathShown, surf.SnapshotEntries());
         }
     }
 
-    private async Task CopySelection(bool toSurf, CancellationToken token)
+    private async Task CopySelection(bool toSurf, IReadOnlyList<ArchiveEntry> items, CancellationToken token)
     {
         BrowserPane origin = toSurf ? windows : surf;
         BrowserPane target = toSurf ? surf : windows;
         int failures = 0, waitingForTape = 0;
-        foreach (var entry in toSurf ? origin.SelectedFiles : origin.SelectedItems)
+        foreach (var entry in items)
         {
             token.ThrowIfCancellationRequested();
             string source = toSurf ? Path.Combine(origin.PathShown, entry.Name) : ArchiveSession.Child(origin.PathShown, entry.Name);
@@ -466,9 +515,9 @@ internal sealed class MainWindow : Form
             }
         }
 
-        if (toSurf)
+        if (toSurf && !editingSurf)
             await NavigateRemote(target.PathShown, null);
-        else
+        else if (!toSurf)
             await NavigateLocal(target.PathShown, null);
         SetFeedback(failures > 0 ? $"{failures:N0} transfer(s) failed. See Activity."
             : waitingForTape > 0 ? "Folders with files on tape can be downloaded once all files are on disk."
@@ -848,7 +897,7 @@ internal sealed class MainWindow : Form
 
     private void TryStartNextArchive()
     {
-        if (archiveOperation is not null || operation is not null || archive is null || closeWhenIdle)
+        if (archiveOperation is not null || operation is not null || editingSurf || archive is null || closeWhenIdle)
             return;
         ArchiveQueueItem? item = null;
         if (ChangeQueue(() => item = archiveQueue.StartNext()) && item is not null)
@@ -875,10 +924,12 @@ internal sealed class MainWindow : Form
     {
         using var cancellation = new CancellationTokenSource();
         archiveOperation = cancellation;
+        packageSurfPath = item.RemotePath;
         var token = cancellation.Token;
         UpdateControls();
         ArchiveQueueState outcome = ArchiveQueueState.Failed;
         string? detail = null;
+        ArchiveRequest? request = null;
         var options = item.Options with
         {
             Retention = item.Options.Retention with { ArchivedOn = DateOnly.FromDateTime(DateTime.Today) }
@@ -889,14 +940,14 @@ internal sealed class MainWindow : Form
             {
                 if (operation is null)
                     SetFeedback($"Checking the saved source selection for {item.Name}…");
-                var request = await Task.Run(() => item.Prepare(token), token);
+                request = await Task.Run(() => item.Prepare(token), token);
                 token.ThrowIfCancellationRequested();
                 archiveQueue.SetRecoveryPath(item, request.LocalPath);
                 if (options.LocalStagingFolder is not null && request.Plan.UsesFallback)
                     transfers.Log($"Local staging has too little free space for {request.Name}. Using {request.LocalPath}.");
                 await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
                     ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
-                        target, options, progress, token), token);
+                        target, options, progress, token), token, item.LocalName);
                 outcome = ArchiveQueueState.Finished;
                 transfers.Log($"{item.Name} was uploaded and verified.");
             }
@@ -916,39 +967,64 @@ internal sealed class MainWindow : Form
                     SetFeedback(detail, error: true);
             }
 
-            if (ChangeQueue(() => archiveQueue.Finish(item.LocalName, outcome, detail)) && outcome == ArchiveQueueState.Finished)
+            bool saved = ChangeQueue(() => archiveQueue.Finish(item.LocalName, outcome, detail));
+            if (request is not null && options.RemoveOriginals)
+                await RefreshArchiveSource(request);
+            if (saved && outcome == ArchiveQueueState.Finished)
                 await RefreshAfterArchive(item);
         }
         finally
         {
             archiveOperation = null;
+            packageSurfPath = null;
             FinishWork();
+        }
+    }
+
+    private async Task RefreshArchiveSource(ArchiveRequest request)
+    {
+        if (closeWhenIdle || !windows.HasFolder)
+            return;
+        string source = request.Plan.Source;
+        string visible = windows.PathShown;
+        if (!visible.Equals(source, StringComparison.OrdinalIgnoreCase) &&
+            !request.Items.Any(item => item.IsDirectory && PackageFiles.IsWithin(visible, Path.Combine(source, item.Name))))
+            return;
+        if (operation is not null)
+        {
+            pendingSourceRefresh = request;
+            return;
+        }
+
+        int refresh = localListingVersion + 1;
+        try
+        {
+            try { await NavigateLocal(visible, null); }
+            catch (DirectoryNotFoundException) when (visible != source && localListingVersion == refresh &&
+                operation is null && !closeWhenIdle)
+            {
+                await NavigateLocal(source, null);
+            }
+        }
+        catch (Exception error)
+        {
+            transfers.Log($"Could not refresh the local source folder. {error.Message}");
         }
     }
 
     private async Task RefreshAfterArchive(ArchiveQueueItem item)
     {
-        if (operation is not null || closeWhenIdle || archiveQueue.Items.Any(queued => queued.State == ArchiveQueueState.Queued))
+        if (operation is not null || editingSurf || closeWhenIdle || archiveQueue.Items.Any(queued => queued.State == ArchiveQueueState.Queued))
             return;
-        bool refreshLocal = windows.PathShown.Equals(item.Source, StringComparison.OrdinalIgnoreCase);
-        bool refreshSurf = surf.PathShown == item.Parent;
-        if (refreshLocal || refreshSurf)
-        {
-            await Run(async _ =>
-            {
-                if (refreshLocal)
-                    await NavigateLocal(item.Source, null);
-                if (refreshSurf)
-                    await NavigateRemote(item.Parent, null);
-            });
-        }
+        if (surf.PathShown == item.Parent)
+            await Run(_ => NavigateRemote(item.Parent, null));
         if (!closeWhenIdle)
             SetFeedback($"{item.Name} was uploaded and verified.");
     }
 
     private async Task ResumeArchive(ArchiveQueueItem? selected = null)
     {
-        if (archive is null || operation is not null || archiveOperation is not null || closeWhenIdle)
+        if (archive is null || operation is not null || archiveOperation is not null || editingSurf || closeWhenIdle)
             return;
         await Run(async token =>
         {
@@ -979,10 +1055,12 @@ internal sealed class MainWindow : Form
             token.ThrowIfCancellationRequested();
             if (item is not null)
                 archiveQueue.StartRecovery(item, folder);
+            packageSurfPath = remote;
+            UpdateControls();
             try
             {
                 await RunPackage(manifest.RemoteName, folder, remote, (target, progress) =>
-                    ArchivePackage.Resume(folder, target, progress, token, manifest), token);
+                    ArchivePackage.Resume(folder, target, progress, token, manifest), token, item?.LocalName);
             }
             catch (Exception error)
             {
@@ -995,9 +1073,10 @@ internal sealed class MainWindow : Form
                 }
                 throw;
             }
+            finally { packageSurfPath = null; }
             if (item is not null)
                 ChangeQueue(() => archiveQueue.Finish(item.LocalName, ArchiveQueueState.Finished));
-            if (!closeWhenIdle && surf.HasFolder)
+            if (!closeWhenIdle && !editingSurf && surf.HasFolder)
                 await NavigateRemote(surf.PathShown, null);
             SetFeedback("Archive upload verified. Remaining local archive parts removed.");
         }, transfer: true);
@@ -1016,9 +1095,10 @@ internal sealed class MainWindow : Form
     }
 
     private async Task RunPackage(string name, string recovery, string destination,
-        Func<IPackageDestination, Action<PackageMeter>, Task> run, CancellationToken token)
+        Func<IPackageDestination, Action<PackageMeter>, Task> run, CancellationToken token, string? queueId)
     {
         var stages = new Dictionary<PackageStep, TransferJob>();
+        var completed = new HashSet<PackageStep>();
         var gate = new object();
         if (operation is null || transferring)
             SetFeedback("Preparing archive destination…");
@@ -1027,6 +1107,7 @@ internal sealed class MainWindow : Form
             await Task.Run(async () =>
             {
                 using var target = archive!.PackageTarget();
+                target.DestinationCreated += parent => BeginInvoke(() => _ = RefreshCreatedDestination(parent));
                 await run(target, Report);
             });
         }
@@ -1071,10 +1152,27 @@ internal sealed class MainWindow : Form
                     Invoke(() => transfers.Log(updateMessage, job));
                 if (meter.Finished)
                 {
-                    Invoke(() => transfers.Finish(job, meter.Skipped ? TransferState.Skipped : TransferState.Completed));
+                    Invoke(() =>
+                    {
+                        transfers.Finish(job, meter.Skipped ? TransferState.Skipped : TransferState.Completed);
+                        if (queueId is not null && completed.Add(meter.Step))
+                            ChangeQueue(() => archiveQueue.CompleteSteps(queueId, completed.Count));
+                    });
                     stages.Remove(meter.Step);
                 }
             }
+        }
+    }
+
+    private async Task RefreshCreatedDestination(string parent)
+    {
+        if (closeWhenIdle || editingSurf || (operation is not null && !transferring) || surf.PathShown != parent)
+            return;
+        try { await NavigateRemote(parent, null, independent: true); }
+        catch (Exception error)
+        {
+            if (!closeWhenIdle)
+                transfers.Log($"Could not refresh {parent}. {error.Message}");
         }
     }
 
@@ -1094,41 +1192,54 @@ internal sealed class MainWindow : Form
         BrowserPane pane = local ? windows : surf;
         var items = pane.SelectedItems;
         string directory = pane.PathShown;
-        if (items.Count == 0 || !RemovalDialog.Confirm(this, local, directory, items))
+        if (items.Count == 0 || (!local && (!CanEditSurf || items.Any(item => !CanRemoveSurfItem(directory, item)))) ||
+            !RemovalDialog.Confirm(this, local, directory, items))
             return;
 
-        await Run(async _ =>
+        if (local)
+            await Run(_ => RemoveSelected(null));
+        else
+            await RunSurfEdit(RemoveSelected);
+
+        async Task RemoveSelected(ArchiveSession? session)
         {
+            if (session is not null && items.Any(item => !CanRemoveSurfItem(directory, item)))
+                throw new IOException("One or more selected items are in use by a SURF transfer.");
             int removed = 0;
+            string? failure = null;
             foreach (var item in items)
             {
                 SetFeedback($"Removing {item.Name}…");
                 try
                 {
-                    if (local)
+                    if (session is null)
                         await Task.Run(() => LocalFiles.Remove(directory, item));
                     else
-                        await Task.Run(() => archive!.Remove(directory, item));
+                        await Task.Run(() => session.Remove(directory, item));
                     removed++;
                     transfers.Log($"Removed from {(local ? "Local / NAS" : "SURF")}: {item.Name}");
                 }
                 catch (Exception error)
                 {
+                    failure ??= error.Message;
                     transfers.Log($"Removal failed or incomplete for {item.Name}: {error.Message}");
                 }
             }
-            if (local)
+            if (session is null)
                 await NavigateLocal(directory, null);
-            else
-                await NavigateRemote(directory, null);
+            else if (!closeWhenIdle && surf.PathShown == directory)
+                await NavigateRemote(directory, null, independent: true);
             int failed = items.Count - removed;
             string summary = $"Removed {removed:N0} of {items.Count:N0} selected items.";
-            SetFeedback(failed == 0 ? summary : summary + " See the log for incomplete removals.", error: failed > 0);
-        });
+            SetFeedback(failure is null ? summary : $"{summary} {failure}", error: failed > 0);
+        }
     }
 
-    private async Task MakeFolder(CancellationToken _)
+    private async Task MakeFolder()
     {
+        if (!CanEditSurf)
+            return;
+        string directory = surf.PathShown;
         using var dialog = new Form
         {
             Text = "New SURF folder", ClientSize = new Size(382, 112), FormBorderStyle = FormBorderStyle.FixedDialog,
@@ -1155,10 +1266,52 @@ internal sealed class MainWindow : Form
         if (dialog.ShowDialog(this) != DialogResult.OK)
             return;
 
-        string path = ArchiveSession.Child(surf.PathShown, name.Text.Trim());
-        await Task.Run(() => archive!.MakeDirectory(path));
-        await NavigateRemote(surf.PathShown, null);
-        SetFeedback("Folder created.");
+        await RunSurfEdit(async session =>
+        {
+            string path = ArchiveSession.Child(directory, name.Text.Trim());
+            if (IsSurfPathInUse(path))
+                throw new IOException("This folder path is in use by a SURF transfer. Choose a different name or location.");
+            await Task.Run(() => session.MakeDirectory(path));
+            if (!closeWhenIdle && surf.PathShown == directory)
+                await NavigateRemote(directory, null, independent: true);
+            SetFeedback("Folder created.");
+        });
+    }
+
+    private bool CanEditSurf => !closeWhenIdle && !editingSurf && archive is not null &&
+        surf.HasFolder && (operation is null || transferring);
+
+    private bool CanRemoveSurfItem(string directory, ArchiveEntry item) =>
+        !((copySurfPaths.Length > 0 || packageSurfPath is not null) &&
+            item.Name.StartsWith(".surfarchive-upload-", StringComparison.Ordinal)) &&
+        !IsSurfPathInUse(ArchiveSession.Child(directory, item.Name));
+
+    private bool IsSurfPathInUse(string path) =>
+        (packageSurfPath is { } packagePath && PathsOverlap(path, packagePath)) ||
+        copySurfPaths.Any(active => PathsOverlap(path, active)) || restores.Keys.Any(active => PathsOverlap(path, active));
+
+    private static bool IsAtOrBelow(string path, string parent) =>
+        path.Equals(parent, StringComparison.Ordinal) || path.StartsWith(parent + "/", StringComparison.Ordinal);
+
+    private static bool PathsOverlap(string path, string active) => IsAtOrBelow(path, active) || IsAtOrBelow(active, path);
+
+    private async Task RunSurfEdit(Func<ArchiveSession, Task> edit)
+    {
+        if (!CanEditSurf || archive is not { } session)
+            return;
+        editingSurf = true;
+        UpdateControls();
+        try { await edit(session); }
+        catch (Exception error)
+        {
+            transfers.Log(error.Message);
+            SetFeedback(error.Message, error: true);
+        }
+        finally
+        {
+            editingSurf = false;
+            FinishWork();
+        }
     }
 
     private async Task Run(Func<CancellationToken, Task> work, bool transfer = false)
@@ -1222,7 +1375,7 @@ internal sealed class MainWindow : Form
     {
         closeWhenIdle = true;
         StopRestores();
-        if (operation is null && archiveOperation is null)
+        if (operation is null && archiveOperation is null && !editingSurf)
             return;
         e.Cancel = true;
         operation?.Cancel();
@@ -1235,16 +1388,21 @@ internal sealed class MainWindow : Form
         UpdateControls();
         if (closeWhenIdle)
         {
-            if (operation is null && archiveOperation is null)
+            if (operation is null && archiveOperation is null && !editingSurf)
                 BeginInvoke(Close);
             return;
+        }
+        if (operation is null && pendingSourceRefresh is { } source)
+        {
+            pendingSourceRefresh = null;
+            _ = RefreshArchiveSource(source);
         }
         TryStartNextArchive();
     }
 
     private void UpdateControls()
     {
-        bool idle = operation is null && !closeWhenIdle;
+        bool idle = operation is null && !editingSurf && !closeWhenIdle;
         bool transferIdle = idle && archiveOperation is null;
         bool online = archive is not null;
         signIn.Text = online ? "Sign out" : "Sign in";
@@ -1265,8 +1423,8 @@ internal sealed class MainWindow : Form
         package.Enabled = idle && online && archiveQueue.IsAvailable && surf.HasFolder && ArchivePackage.CanArchive(localSelection);
         queuePanel.SetRecoveryAvailable(transferIdle && online);
         removeWindows.Enabled = transferIdle && windows.SelectedItems.Count > 0;
-        removeSurf.Enabled = transferIdle && online && surf.SelectedItems.Count > 0;
-        newFolder.Enabled = transferIdle && online && surf.HasFolder;
+        removeSurf.Enabled = CanEditSurf && selected.Count > 0 && selected.All(item => CanRemoveSurfItem(surf.PathShown, item));
+        newFolder.Enabled = CanEditSurf;
         var selectedRestore = SelectedRestore;
         string cancelCaption = selectedRestore is null ? "Cancel activity"
             : selectedRestore.Polling.OpenWhenReady ? "Cancel preview" : "Stop monitoring";

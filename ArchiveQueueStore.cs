@@ -84,6 +84,8 @@ internal sealed partial class ArchiveQueueStore : IDisposable
             || !ArchivePackage.CanArchive(item.Selection)
             || item.SourceHash is not { Length: 64 } || !item.SourceHash.All(Uri.IsHexDigit)
             || item.Options?.Retention?.Fields is not { Years: >= 1 and <= RetentionMetadata.MaximumYears }
+            || item.Progress is { } progress && (progress.Total < 1 || progress.Completed < 0 ||
+                progress.Completed > progress.Total || progress.Elapsed < TimeSpan.Zero)
             || !Enum.IsDefined(item.State))
             throw new IOException("The saved archive queue contains an invalid entry.");
         ArchivePackage.ValidateFolderName(item.Name);

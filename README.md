@@ -2,13 +2,17 @@
 
 Windows x64 file manager for SURF Data Archive. Browse local drives and network shares in **Local / NAS** on the left and your personal SURF archive on the right. Each side has a resizable folder tree and a sortable, filterable file list.
 
+[Quick start for new users](https://cellular-imaging-amsterdam-umc.github.io/archief_to_surfarchive/)
+
 The Local / NAS pane starts at `L:\`. The location menu also has shortcuts to `L:\basic` and `L:\Archief\active`.
 
 1. Open **SurfDataArchiveTransfer.exe** and sign in with a SURF Data Archive account. **Remember username** saves the username locally. Enter the password each time you sign in.
 2. **Archive to SURF** is the usual upload action. **Upload to SURF** is available for direct copies only when every selected item is a file strictly larger than 100 MB. It always asks for confirmation. Use **Recent** in either pane to reopen a visited folder. You can also enter a folder or UNC path in the Local / NAS path field.
 3. Select a file or a folder in the SURF contents list and click **Download**. An entire folder can be downloaded only if it has no subfolders. Folder status reflects the files directly inside it. For files on tape, select **Restore from tape**, or accept the restore prompt when attempting a folder download. **Activity** checks every 30 seconds. When the restore reports **Ready to download**, select the file or folder and click **Download**. The app verifies that each file is on disk before copying it. Stopping the monitor leaves previously submitted restore requests active on SURF.
-4. **Activity** shows the action, progress and elapsed time for each row. Select a row to see what it measures. SFTP transfers also show their copy time. Byte rates and ETA appear where the app has enough information to calculate them.
+4. **Activity** shows the action, progress and elapsed time for each row. It shows four rows at a time and scrolls when more are available. SFTP transfers also show their copy time. Byte rates and ETA appear where the app has enough information to calculate them.
 5. Select files or folders on either side and use **Remove…** to review the exact location and names. Removal is permanent. Removing a folder also removes its contents. **Cancel** is the default.
+
+You can create folders and remove unrelated files on SURF during a transfer. The app protects paths used by the transfer and refreshes the SURF listing when it creates an archive destination in the open folder. It also refreshes the visible Local / NAS source after removing archived originals.
 
 Only direct subfolders of `L:\Archief\Active` are checked in advance. A subfolder is listed when the app can open it, including when it is empty. Deeper folders are opened on demand.
 
@@ -21,6 +25,8 @@ The app uses SFTP on port 22 and verifies the [host keys published by SURF](http
 Select only folders or only files in **Local / NAS**. Use **Archive to SURF** to confirm and queue the selection. Each selected folder becomes a separate queue entry and keeps its name on SURF. Selected files form one archive with the name you enter. Existing destination folders are never overwritten or merged.
 
 The **Queue** above **Activity** saves archive jobs and their settings locally for each SURF account. After sign-in, waiting jobs start automatically in queue order. Paused jobs stay paused until you use the resume icon. The app checks that the source selection still matches what you queued before it starts an archive.
+
+Queue progress advances as archive steps complete. The total running time includes waits while the job is active and stays visible after it finishes, including after an app restart. The queue shows up to four rows before it scrolls.
 
 Finished jobs stay visible across restarts. Use the trash icon to remove one entry or **Remove all finished** to clear all successful jobs from the queue. Both actions leave the archived data on SURF. Use **Cancel activity** to stop the running job. A job that was running when the app closed appears as **Interrupted**. Its **Resume archive upload** icon uses the saved recovery folder and asks you to confirm the SURF destination. The same icon is available for failed or cancelled jobs with a saved staging path.
 

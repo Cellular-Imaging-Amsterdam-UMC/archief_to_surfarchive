@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="A Windows app for sending folders to SURF Data Archive and checking that they arrived intact.">
+  <meta name="theme-color" content="#12171f">
+  <title>SurfDataArchiveTransfer · Windows guide</title>
+  <link rel="icon" href="app.ico">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="./">
+        <img src="app.ico" alt="" width="28" height="28">
+        <span>SurfDataArchiveTransfer</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#quick-start">Quick start</a>
+        <a href="#faq">FAQ</a>
+        <a href="https://github.com/Cellular-Imaging-Amsterdam-UMC/archief_to_surfarchive">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap" id="main">
+    <section class="hero" aria-labelledby="page-heading">
+      <div class="hero-copy">
+        <h1 id="page-heading">Archive your files<br>to <em>SURF.</em></h1>
+        <p class="intro">Browse your local and network folders alongside SURF Data Archive. Send a folder, follow each step, and retrieve it when you need it.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="https://github.com/Cellular-Imaging-Amsterdam-UMC/archief_to_surfarchive/releases/latest/download/SurfDataArchiveTransfer.exe">
+            <span aria-hidden="true">↓</span> Download for Windows
+          </a>
+          <a class="button secondary" href="#quick-start">Quick start <span aria-hidden="true">→</span></a>
+        </div>
+        <p class="requirements">Windows x64 · Standalone .exe · SURF Data Archive account required</p>
+      </div>
+
+      <figure class="preview">
+        <div class="app-window" role="img" aria-label="Illustration of the app with local microscopy folders on the left, a SURF archive on the right, and queue progress below.">
+          <div aria-hidden="true">
+            <div class="app-title">
+              <span class="app-name"><img src="app.ico" alt="" width="17" height="17"> SurfDataArchiveTransfer</span>
+              <span class="connected">Connected</span>
+            </div>
+            <div class="app-panes">
+              <div class="pane">
+                <strong>Local / NAS</strong>
+                <div class="location">L:\Archief\active\Microscopy</div>
+                <div class="app-list">
+                  <span class="app-list-header">Name</span>
+                  <span class="file-row selected"><i class="folder"></i> Cell images</span>
+                  <span class="file-row"><i class="folder"></i> Slides</span>
+                  <span class="file-row"><i class="file"></i> Project notes.txt</span>
+                </div>
+              </div>
+              <div class="pane">
+                <strong>SURF Data Archive</strong>
+                <div class="location">My archive / Microscopy</div>
+                <div class="app-list">
+                  <span class="app-list-header">Name</span>
+                  <span class="file-row"><i class="folder"></i> Cell images</span>
+                  <span class="file-row"><i class="folder"></i> Earlier experiments</span>
+                </div>
+              </div>
+            </div>
+            <div class="app-queue">
+              <div class="queue-title"><span>↔</span> Queue</div>
+              <div class="queue-row queue-header"><span>Archive</span><span>Progress</span><span>Total time</span></div>
+              <div class="queue-row"><span>Cell images</span><span class="mini-progress"><i></i> 100%</span><span>4:18</span></div>
+            </div>
+          </div>
+        </div>
+        <figcaption>Example workspace with a finished archive</figcaption>
+      </figure>
+    </section>
+
+    <section class="guide-section" id="quick-start" aria-labelledby="start-heading">
+      <div class="section-heading">
+        <h2 id="start-heading">Your first archive</h2>
+        <p>Have your SURF Data Archive account and a folder you want to keep.</p>
+      </div>
+      <ol class="steps">
+        <li>
+          <span class="step-number" aria-hidden="true">01</span>
+          <h3>Open and sign in</h3>
+          <p>Download and open the Windows app. Sign in with your SURF Data Archive username and password.</p>
+        </li>
+        <li>
+          <span class="step-number" aria-hidden="true">02</span>
+          <h3>Choose source and destination</h3>
+          <p>Select a folder on the left in <strong>Local / NAS</strong>. Open the destination on the right in <strong>SURF Data Archive</strong>.</p>
+        </li>
+        <li>
+          <span class="step-number" aria-hidden="true">03</span>
+          <h3>Queue the archive</h3>
+          <p>Choose <strong>Archive to SURF…</strong>, review the options, then follow the archive in <strong>Queue</strong> and <strong>Activity</strong>.</p>
+        </li>
+      </ol>
+      <aside class="notice">
+        <strong>Want to keep your local files?</strong>
+        <p>Clear <strong>Remove originals</strong> in the archive confirmation. When selected, the app removes originals after the SURF checks pass.</p>
+      </aside>
+    </section>
+
+    <section class="guide-section restore" aria-labelledby="restore-heading">
+      <div class="section-heading">
+        <h2 id="restore-heading">Get your files back</h2>
+        <p>Open the archive folder in the SURF pane. <code>contents.html</code> shows what was packed.</p>
+      </div>
+      <ol class="restore-steps">
+        <li><strong>Restore if needed.</strong> For items on tape, choose <strong>Restore from tape</strong> and wait for <strong>Ready to download</strong> in Activity.</li>
+        <li><strong>Download the parts.</strong> Put all numbered ZIP parts in the same local folder.</li>
+        <li><strong>Extract with 7-Zip.</strong> Open the file ending in <code>.zip.001</code> and choose <strong>Extract</strong>. 7-Zip reads the remaining parts automatically.</li>
+      </ol>
+    </section>
+
+    <section class="guide-section faq-section" id="faq" aria-labelledby="faq-heading">
+      <h2 id="faq-heading">Common questions</h2>
+      <div class="faq">
+        <details>
+          <summary>Do I need to install anything?</summary>
+          <p>The Windows app is a standalone executable with the .NET runtime included. Use <a href="https://www.7-zip.org/">7-Zip</a> to open multipart archives. Windows may show a publisher warning for the test-signed download.</p>
+        </details>
+        <details>
+          <summary>What happens to the queue when I close the app?</summary>
+          <p>The app saves the queue for your SURF account. After sign-in, waiting jobs start automatically and paused jobs stay paused. If an interrupted upload has a local recovery package, use its recovery icon.</p>
+        </details>
+        <details>
+          <summary>Does the app save my password?</summary>
+          <p>Enter your password when you sign in. The <strong>Remember username</strong> option saves only your username on this PC.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>Cellular Imaging · Amsterdam UMC</span>
+      <div>
+        <a href="https://github.com/Cellular-Imaging-Amsterdam-UMC/archief_to_surfarchive#readme">App documentation</a>
+        <a href="https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/1474651/Data+Archive">About SURF Data Archive</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

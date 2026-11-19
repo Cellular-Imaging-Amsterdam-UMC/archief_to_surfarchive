@@ -110,6 +110,13 @@ internal sealed class ArchiveSession : IDisposable
         return await ListEntries(sftp, directory, strict: false, CancellationToken.None);
     }
 
+    public async Task<List<ArchiveEntry>> ListIndependent(string directory)
+    {
+        using var connection = CreateSftpClient();
+        await connection.ConnectAsync(CancellationToken.None);
+        return await ListEntries(connection, directory, strict: false, CancellationToken.None);
+    }
+
     private static async Task<List<ArchiveEntry>> ListEntries(SftpClient client, string directory, bool strict,
         CancellationToken token)
     {
@@ -138,8 +145,9 @@ internal sealed class ArchiveSession : IDisposable
 
     public void MakeDirectory(string directory)
     {
-        Reconnect();
-        sftp.CreateDirectory(directory);
+        using var connection = CreateSftpClient();
+        connection.Connect();
+        connection.CreateDirectory(directory);
     }
 
     public async Task<Dictionary<string, ArchiveState>> ReadStatuses(string directory,
@@ -570,6 +578,7 @@ internal sealed class ArchiveSession : IDisposable
         private readonly PackageRetry retry = new(TimeProvider.System);
         private string directory = "";
         public string Root => session.Root;
+        public event Action<string>? DestinationCreated;
 
         public async Task Prepare(string parent, string name, bool resume, Action<string> onRetry, CancellationToken token)
         {
@@ -579,6 +588,7 @@ internal sealed class ArchiveSession : IDisposable
 
             directory = Child(parent, name);
             bool prepared = false;
+            bool created = false;
             await retry.Run($"Preparing SURF folder {name}", async (_, ct) =>
             {
                 using var validation = await session.OpenShellAsync(ct);
@@ -592,7 +602,10 @@ internal sealed class ArchiveSession : IDisposable
                     if (!resume && exists)
                         throw new IOException($"The SURF destination already exists: {directory}.");
                     if (!exists)
+                    {
                         await client.CreateDirectoryAsync(directory, ct);
+                        created = true;
+                    }
                     prepared = true;
                 }
                 await RunAsync(validation, "test -d " + Quote(directory) + " && test ! -L " + Quote(directory), ct);
@@ -604,6 +617,8 @@ internal sealed class ArchiveSession : IDisposable
                 }
                 return true;
             }, ResetUploadClient, onRetry, token);
+            if (created)
+                DestinationCreated?.Invoke(parent);
         }
 
         public bool HasPart(string name) => existing.Contains(name);
