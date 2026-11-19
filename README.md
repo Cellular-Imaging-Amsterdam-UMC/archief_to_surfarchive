@@ -28,7 +28,7 @@ Select only folders or only files in **Local / NAS**. Use **Archive to SURF** to
 
 The **Queue** above **Activity** saves archive jobs and their settings locally for each SURF account. After sign-in, waiting jobs start automatically in queue order. Paused jobs stay paused until you use the resume icon. The app checks that the source selection still matches what you queued before it starts an archive.
 
-The bottom status bar shows the item count, scanned size and elapsed time while the app scans an archive and checks staging space. **Cancel scan** becomes available after ten seconds and stops that archive action before it can upload anything.
+You can keep browsing and use **Archive to SURF** to add another selection while a scan or transfer runs. The bottom status bar shows the most recent active scan, its item count, scanned size and elapsed time. **Cancel scan** becomes available after ten seconds and stops the scan shown there.
 
 Queue progress advances as archive steps complete. The total running time includes waits while the job is active and stays visible after it finishes, including after an app restart. The queue shows up to four rows before it scrolls.
 

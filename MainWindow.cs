@@ -24,6 +24,8 @@ internal sealed class MainWindow : Form
     private readonly Button cancelScan = DarkTheme.Button("Cancel scan", ActionIcon.Cancel);
     private readonly System.Windows.Forms.Timer scanTimer = new() { Interval = 200 };
     private readonly List<ActiveArchiveScan> archiveScans = [];
+    private readonly HashSet<CancellationTokenSource> queuePreparations = [];
+    private readonly SemaphoreSlim queueDialog = new(1);
     private ArchiveSession? archive;
     private CancellationTokenSource? operation;
     private CancellationTokenSource? archiveOperation;
@@ -114,6 +116,7 @@ internal sealed class MainWindow : Form
         FormClosed += (_, _) =>
         {
             scanTimer.Dispose();
+            queueDialog.Dispose();
             StopStatusLookup();
             StopRestores();
             archiveQueue.Dispose();
@@ -204,10 +207,10 @@ internal sealed class MainWindow : Form
         layout.Controls.Add(statusBar, 0, 5);
     }
 
-    private async Task<T> ScanArchive<T>(CancellationTokenSource cancellation, string phase,
+    private async Task<T> ScanArchive<T>(CancellationTokenSource cancellation, string name, string phase,
         Func<ArchiveScanProgress, CancellationToken, T> scan)
     {
-        var active = new ActiveArchiveScan(cancellation, new(phase));
+        var active = new ActiveArchiveScan(cancellation, name, new(phase));
         archiveScans.Add(active);
         RefreshScanStatus();
         try { return await Task.Run(() => scan(active.Progress, cancellation.Token), cancellation.Token); }
@@ -231,12 +234,16 @@ internal sealed class MainWindow : Form
             return;
         }
         var (phase, files, folders, bytes) = active.Progress.Read();
+        string name = active.Name.Length > 35 ? active.Name[..34] + "…" : active.Name;
+        if (phase == $"Scanning {active.Name}")
+            phase = "Scanning selection";
         string label = active.Cancellation.IsCancellationRequested ? "Cancelling scan…" : phase;
         if (label.Length > 52)
             label = label[..51] + "…";
+        string otherScans = archiveScans.Count > 1 ? $"  ·  {archiveScans.Count:N0} scans active" : "";
         feedback.ForeColor = DarkTheme.Mint;
-        feedback.Text = $"{label}  ·  {files + folders:N0} items ({files:N0} files, {folders:N0} folders)" +
-            $"  ·  {TransferJob.FormatBytes(bytes)}  ·  {TransferJob.FormatTime(active.Clock.Elapsed)}";
+        feedback.Text = $"{label} ({name})  ·  {files + folders:N0} items ({files:N0} files, {folders:N0} folders)" +
+            $"  ·  {TransferJob.FormatBytes(bytes)}  ·  {TransferJob.FormatTime(active.Clock.Elapsed)}{otherScans}";
     }
 
     private async Task InitialLoad(CancellationToken token)
@@ -971,52 +978,81 @@ internal sealed class MainWindow : Form
             item.Cancellation.Cancel();
     }
 
+    private bool CanQueueArchive => CanBrowse && !editingSurf &&
+        archive is not null && archiveQueue.IsAvailable && surf.HasFolder;
+
     private async Task ArchiveSelected()
     {
-        if (operation is not null || archive is null || !archiveQueue.IsAvailable || !surf.HasFolder || closeWhenIdle)
+        if (!CanQueueArchive)
             return;
         var selection = windows.SelectedItems;
-        string source = windows.PathShown;
-        string destination = surf.PathShown;
         if (!ArchivePackage.CanArchive(selection))
             return;
-        await Run(async token =>
+        string source = windows.PathShown;
+        string destination = surf.PathShown;
+        var existing = surf.SnapshotEntries().Select(entry => entry.Name).ToHashSet(StringComparer.Ordinal);
+        using var cancellation = new CancellationTokenSource();
+        var token = cancellation.Token;
+        queuePreparations.Add(cancellation);
+        UpdateControls();
+        try
         {
             string? filesFolderName = null;
             if (!selection[0].IsDirectory)
             {
-                filesFolderName = PackageDialog.AskFolderName(this);
+                filesFolderName = await ShowQueueDialog(() => PackageDialog.AskFolderName(this), token);
                 if (filesFolderName is null)
                     return;
             }
-            var cancellation = operation!;
-            var requests = await ScanArchive(cancellation, "Scanning selection", (progress, ct) =>
+            string name = filesFolderName ?? (selection.Count == 1 ? selection[0].Name : $"{selection.Count:N0} folders");
+            var requests = await ScanArchive(cancellation, name, "Scanning selection", (progress, ct) =>
                 ArchivePackage.PlanSelection(source, destination, selection, filesFolderName, ct, progress));
-            archiveQueue.CheckDestinations(requests.Select(request => request.RemotePath));
-            var existing = surf.SnapshotEntries().Select(entry => entry.Name).ToHashSet(StringComparer.Ordinal);
-            foreach (var request in requests)
+            var options = await ShowQueueDialog(() =>
             {
-                if (existing.Contains(request.Name))
-                    throw new IOException($"The SURF destination already exists at {request.RemotePath}. Choose a different parent folder or name.");
-            }
-            var options = PackageDialog.Confirm(this, requests);
+                archiveQueue.CheckDestinations(requests.Select(request => request.RemotePath));
+                foreach (var request in requests)
+                    if (existing.Contains(request.Name))
+                        throw new IOException($"The SURF destination already exists at {request.RemotePath}. Choose a different parent folder or name.");
+                return PackageDialog.Confirm(this, requests);
+            }, token);
             if (options is null)
-            {
-                SetFeedback("");
                 return;
-            }
-            token.ThrowIfCancellationRequested();
-            var queued = await ScanArchive(cancellation, "Preparing the archive queue", (progress, ct) => requests.Select(request =>
+            var queued = await ScanArchive(cancellation, name, "Preparing the archive queue", (progress, ct) => requests.Select(request =>
                 ArchiveQueueItem.FromRequest(request, options, ct, progress)).ToArray());
             token.ThrowIfCancellationRequested();
             archiveQueue.Add(queued);
             SetFeedback(requests.Count == 1 ? "Archive added to the queue." : $"{requests.Count:N0} archives added to the queue.");
-        });
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            SetFeedback("Archive preparation cancelled.");
+        }
+        catch (Exception error)
+        {
+            transfers.Log(error.Message);
+            SetFeedback(error.Message, error: true);
+        }
+        finally
+        {
+            queuePreparations.Remove(cancellation);
+            FinishWork();
+        }
+    }
+
+    private async Task<T> ShowQueueDialog<T>(Func<T> show, CancellationToken token)
+    {
+        await queueDialog.WaitAsync(token);
+        try
+        {
+            token.ThrowIfCancellationRequested();
+            return show();
+        }
+        finally { queueDialog.Release(); }
     }
 
     private void TryStartNextArchive()
     {
-        if (archiveOperation is not null || operation is not null || editingSurf || archive is null || closeWhenIdle)
+        if (HasActiveWork || archive is null || closeWhenIdle)
             return;
         ArchiveQueueItem? item = null;
         if (ChangeQueue(() => item = archiveQueue.StartNext()) && item is not null)
@@ -1057,7 +1093,7 @@ internal sealed class MainWindow : Form
         {
             try
             {
-                request = await ScanArchive(cancellation, $"Rescanning {item.Name}", (progress, ct) => item.Prepare(ct, progress));
+                request = await ScanArchive(cancellation, item.Name, "Rescanning selection", (progress, ct) => item.Prepare(ct, progress));
                 token.ThrowIfCancellationRequested();
                 archiveQueue.SetRecoveryPath(item, request.LocalPath);
                 if (options.LocalStagingFolder is not null && request.Plan.UsesFallback)
@@ -1492,20 +1528,25 @@ internal sealed class MainWindow : Form
     {
         closeWhenIdle = true;
         StopRestores();
-        if (operation is null && archiveOperation is null && !editingSurf)
+        if (!HasActiveWork)
             return;
         e.Cancel = true;
         operation?.Cancel();
         archiveOperation?.Cancel();
+        foreach (var preparation in queuePreparations.ToArray())
+            preparation.Cancel();
         UpdateControls();
     }
+
+    private bool HasActiveWork => operation is not null || archiveOperation is not null ||
+        editingSurf || queuePreparations.Count > 0;
 
     private void FinishWork()
     {
         UpdateControls();
         if (closeWhenIdle)
         {
-            if (operation is null && archiveOperation is null && !editingSurf)
+            if (!HasActiveWork)
                 BeginInvoke(Close);
             return;
         }
@@ -1524,7 +1565,7 @@ internal sealed class MainWindow : Form
         bool online = archive is not null;
         signIn.Text = online ? "Sign out" : "Sign in";
         DarkTheme.SetIcon(signIn, online ? ActionIcon.SignOut : ActionIcon.SignIn);
-        signIn.Enabled = transferIdle;
+        signIn.Enabled = transferIdle && queuePreparations.Count == 0;
         connection.Text = online ? "●  SFTP connected  ·  " + ArchiveSession.Host : "Disconnected";
         connection.ForeColor = online ? DarkTheme.Mint : DarkTheme.Muted;
         windows.SetAvailable(CanBrowse, windows.HasFolder);
@@ -1537,9 +1578,9 @@ internal sealed class MainWindow : Form
         restore.Enabled = idle && online && selected.Any(item =>
             (item.IsDirectory ? item.HasSubfolders != true && !ArchiveStatus.IsOnDisk(item.Status) : ArchiveStatus.CanRestore(item.Status))
             && !restores.ContainsKey(ArchiveSession.Child(surf.PathShown, item.Name)));
-        package.Enabled = idle && online && archiveQueue.IsAvailable && surf.HasFolder && ArchivePackage.CanArchive(localSelection);
+        package.Enabled = CanQueueArchive && ArchivePackage.CanArchive(localSelection);
         queuePanel.SetRecoveryAvailable(transferIdle && online);
-        removeWindows.Enabled = transferIdle && windows.SelectedItems.Count > 0;
+        removeWindows.Enabled = transferIdle && queuePreparations.Count == 0 && localSelection.Count > 0;
         removeSurf.Enabled = CanEditSurf && selected.Count > 0 && selected.All(item => CanRemoveSurfItem(surf.PathShown, item));
         newFolder.Enabled = CanEditSurf;
         var selectedRestore = SelectedRestore;
@@ -1562,7 +1603,7 @@ internal sealed class MainWindow : Form
 
     private sealed record DirectCopy(bool ToSurf, string LocalDirectory, string SurfDirectory, IReadOnlyList<ArchiveEntry> Items);
 
-    private sealed record ActiveArchiveScan(CancellationTokenSource Cancellation, ArchiveScanProgress Progress)
+    private sealed record ActiveArchiveScan(CancellationTokenSource Cancellation, string Name, ArchiveScanProgress Progress)
     {
         public Stopwatch Clock { get; } = Stopwatch.StartNew();
     }
