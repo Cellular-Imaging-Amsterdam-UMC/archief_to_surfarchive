@@ -151,6 +151,7 @@ internal sealed record PackagePlan(string Source, IReadOnlyList<PackageEntry> En
 
 internal static class PackageFiles
 {
+    internal const string FallbackFolderName = ".surfarchive-temp";
     public static string LocalStagingFolder => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SurfArchive", "Staging");
 
@@ -179,7 +180,37 @@ internal static class PackageFiles
     {
         string personal = Path.Combine(LocalFiles.ActiveArchive, "Personal Archive");
         string parent = Directory.Exists(personal) ? personal : LocalFiles.ActiveArchive;
-        return Path.Combine(parent, ".surfarchive-temp");
+        return Path.Combine(parent, FallbackFolderName);
+    }
+
+    internal static string ResolvePath(string path)
+    {
+        // An upload or download can reserve a path before it exists. Resolve its nearest existing parent.
+        for (string? ancestor = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+             ancestor is not null; ancestor = Path.GetDirectoryName(ancestor))
+        {
+            using var handle = CreateFileW(LongPath(ancestor), 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+            if (handle.IsInvalid)
+                continue;
+            var buffer = new StringBuilder(512);
+            uint flags = ancestor.StartsWith(@"\\", StringComparison.Ordinal) ||
+                new DriveInfo(Path.GetPathRoot(ancestor)!).DriveType == DriveType.Network ? 8u : 0u;
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, flags);
+            if (length >= buffer.Capacity)
+            {
+                buffer.EnsureCapacity((int)length + 1);
+                length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, flags);
+            }
+            if (length == 0 || length >= buffer.Capacity)
+                continue;
+            string resolved = buffer.ToString();
+            if (resolved.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                resolved = @"\\" + resolved[8..];
+            else if (resolved.StartsWith(@"\\?\", StringComparison.Ordinal))
+                resolved = resolved[4..];
+            return Path.GetFullPath(Path.Combine(resolved, Path.GetRelativePath(ancestor, path)));
+        }
+        return path;
     }
 
     public static bool IsWithin(string child, string parent)
@@ -352,6 +383,8 @@ internal static class PackageFiles
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security,
         uint mode, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder path, uint capacity, uint flags);
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int informationClass,
         out FileIdentity information, uint size);

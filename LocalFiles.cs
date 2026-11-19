@@ -9,6 +9,22 @@ internal static class LocalFiles
     public static bool CanUploadDirectly(IReadOnlyList<ArchiveEntry> selection) =>
         selection.Count > 0 && selection.All(item => !item.IsDirectory && item.Size > MinimumDirectUpload);
 
+    public static bool IsDownloadStagingName(string name) =>
+        name.StartsWith(".surfarchive-download-", StringComparison.OrdinalIgnoreCase) ||
+        name.StartsWith(".surfarchive-folder-", StringComparison.OrdinalIgnoreCase);
+
+    public static bool PathsOverlap(string first, string second) =>
+        PackageFiles.IsWithin(first, second) || PackageFiles.IsWithin(second, first);
+
+    public static bool CanRemoveResolvedPaths(string directory, IReadOnlyList<ArchiveEntry> items, string[] protectedPaths)
+    {
+        if (protectedPaths.Length == 0)
+            return true;
+        var removalPaths = items.Select(item => PackageFiles.ResolvePath(Path.Combine(directory, item.Name))).ToArray();
+        return !protectedPaths.Select(PackageFiles.ResolvePath).Any(path =>
+            removalPaths.Any(removal => PathsOverlap(removal, path)));
+    }
+
     public const string ArchiveDrive = @"L:\";
     public const string BasicFolder = @"L:\basic";
     public const string ActiveArchive = @"L:\Archief\active";

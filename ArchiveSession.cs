@@ -324,17 +324,20 @@ internal sealed class ArchiveSession : IDisposable
     }
 
     public async Task Upload(string source, string directory, IProgress<TransferProgress> progress, CancellationToken token,
-        long minimumSizeExclusive = -1)
+        long minimumSizeExclusive = -1, ArchiveEntry? expected = null)
     {
+        using var input = OpenSource(source);
+        if (input.Length <= minimumSizeExclusive)
+            throw new IOException("Direct uploads require files larger than 100 MB. Use Archive to SURF instead.");
+        if (expected is { } file)
+            PackageFiles.CheckSource(new(source, file.Name, false, file.Size, file.Modified.ToUniversalTime()), input.SafeFileHandle);
+        token.ThrowIfCancellationRequested();
         Reconnect();
         string name = Path.GetFileName(source);
         string destination = Child(directory, name);
         if (sftp.Exists(destination))
             throw new IOException($"A file or folder named '{name}' already exists on SURF.");
         string staging = Child(directory, ".surfarchive-upload-" + Guid.NewGuid().ToString("N"));
-        using var input = OpenSource(source);
-        if (input.Length <= minimumSizeExclusive)
-            throw new IOException("Direct uploads require files larger than 100 MB. Use Archive to SURF instead.");
 
         try
         {

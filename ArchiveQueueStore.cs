@@ -45,7 +45,7 @@ internal sealed partial class ArchiveQueueStore : IDisposable
                 throw new IOException("The saved queue has duplicate archive IDs.");
             if (item.State == ArchiveQueueState.Running)
             {
-                items[i] = item with { State = ArchiveQueueState.Interrupted, Detail = "The app closed while this archive was running." };
+                items[i] = item with { State = ArchiveQueueState.Interrupted, Detail = "The app closed while this job was running." };
                 changed = true;
             }
         }
@@ -81,14 +81,26 @@ internal sealed partial class ArchiveQueueStore : IDisposable
             || item.Parent.Split('/').Any(part => part is "." or ".." || part.Any(char.IsControl))
             || string.IsNullOrEmpty(item.Source) || !Path.IsPathFullyQualified(item.Source)
             || item.Selection is not { Length: > 0 } || item.Selection.Any(entry => entry is null || string.IsNullOrEmpty(entry.Name))
-            || !ArchivePackage.CanArchive(item.Selection)
-            || item.SourceHash is { } hash && (hash.Length != 64 || !hash.All(Uri.IsHexDigit))
-            || item.Options?.Retention?.Fields is not { Years: >= 1 and <= RetentionMetadata.MaximumYears }
             || item.Progress is { } progress && (progress.Total < 1 || progress.Completed < 0 ||
                 progress.Completed > progress.Total || progress.Elapsed < TimeSpan.Zero)
             || !Enum.IsDefined(item.State))
-            throw new IOException("The saved archive queue contains an invalid entry.");
-        ArchivePackage.ValidateFolderName(item.Name);
+            throw new IOException("The saved queue contains an invalid entry.");
+        if (item.DirectUpload)
+        {
+            if (item.Options is not null || item.RecoveryPath is not null || item.SourceHash is not null
+                || item.Selection is not [{ } file] || file.Name != item.Name || !LocalFiles.CanUploadDirectly(item.Selection))
+                throw new IOException("The saved queue contains an invalid direct upload.");
+            FolderDownload.ValidateWindowsName(item.Name);
+            _ = item.RemotePath;
+        }
+        else
+        {
+            if (!ArchivePackage.CanArchive(item.Selection)
+                || item.SourceHash is { } hash && (hash.Length != 64 || !hash.All(Uri.IsHexDigit))
+                || item.Options?.Retention?.Fields is not { Years: >= 1 and <= RetentionMetadata.MaximumYears })
+                throw new IOException("The saved queue contains an invalid archive.");
+            ArchivePackage.ValidateFolderName(item.Name);
+        }
     }
 
     [GeneratedRegex(@"\ASURF-[0-9]{8}-[0-9]{6}-[a-f0-9]{32}\z")]

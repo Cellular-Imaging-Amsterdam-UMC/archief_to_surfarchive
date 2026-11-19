@@ -27,22 +27,28 @@ internal sealed record ArchiveQueueProgress(int Completed, int Total, TimeSpan E
 }
 
 internal sealed record ArchiveQueueItem(string LocalName, string Name, string Source, string Parent, ArchiveEntry[] Selection,
-    string? SourceHash, PackageOptions Options, ArchiveQueueState State = ArchiveQueueState.Queued,
-    string? RecoveryPath = null, string? Detail = null, ArchiveQueueProgress? Progress = null)
+    string? SourceHash, PackageOptions? Options, ArchiveQueueState State = ArchiveQueueState.Queued,
+    string? RecoveryPath = null, string? Detail = null, ArchiveQueueProgress? Progress = null, bool DirectUpload = false)
 {
     [JsonIgnore]
     public string RemotePath => ArchiveSession.Child(Parent, Name);
 
     [JsonIgnore]
-    public bool CanResumeUpload => RecoveryPath is not null
+    public bool CanResumeUpload => !DirectUpload && RecoveryPath is not null
         && State is ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled;
+
+    [JsonIgnore]
+    public int Steps => DirectUpload ? 1 : ArchiveQueue.ArchiveSteps;
 
     public static ArchiveQueueItem FromSelection(ArchiveSelection selection, PackageOptions options) =>
         new(ArchivePackage.NewName(), selection.Name, selection.Source, selection.Parent, selection.Items, null, options);
 
+    public static ArchiveQueueItem FromUpload(string source, string destination, ArchiveEntry file) =>
+        new(ArchivePackage.NewName(), file.Name, source, destination, [file], null, null, DirectUpload: true);
+
     public ArchiveRequest Prepare(CancellationToken token, ArchiveScanProgress? progress = null)
     {
-        var plan = PackagePlan.Create(Source, Selection, token, progress, Options.LocalStagingFolder,
+        var plan = PackagePlan.Create(Source, Selection, token, progress, Options!.LocalStagingFolder,
             checkSelectedFiles: SourceHash is null);
         if (SourceHash is { } hash)
         {
@@ -105,7 +111,7 @@ internal sealed class ArchiveQueue : IDisposable
             or ArchiveQueueState.Running).Select(item => item.RemotePath).ToHashSet(StringComparer.Ordinal);
         foreach (string path in requested)
             if (!destinations.Add(path))
-                throw new IOException($"An archive for {path} is already in this queue.");
+                throw new IOException($"A job for {path} is already in this queue.");
     }
 
     public void Add(IReadOnlyList<ArchiveQueueItem> requested)
@@ -121,7 +127,7 @@ internal sealed class ArchiveQueue : IDisposable
         var next = items.Find(item => item.State == ArchiveQueueState.Queued);
         if (next is null)
             return null;
-        var running = next with { State = ArchiveQueueState.Running, Progress = ArchiveQueueProgress.Start(ArchiveSteps) };
+        var running = next with { State = ArchiveQueueState.Running, Progress = ArchiveQueueProgress.Start(next.Steps) };
         Replace(next, running);
         return running;
     }
@@ -136,7 +142,8 @@ internal sealed class ArchiveQueue : IDisposable
 
     public void StartRecovery(ArchiveQueueItem item, string folder)
     {
-        if (!items.Contains(item) || item.State is not (ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled)
+        if (!items.Contains(item) || item.DirectUpload
+            || item.State is not (ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled)
             || items.Any(other => other.State == ArchiveQueueState.Running))
             throw new IOException("This queue item is no longer available for recovery.");
         CheckDestinations([item.RemotePath]);

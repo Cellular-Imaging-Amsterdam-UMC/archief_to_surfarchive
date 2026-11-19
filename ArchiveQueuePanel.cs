@@ -7,7 +7,7 @@ internal sealed class ArchiveQueuePanel : UserControl
     private const int TimeColumn = 4;
     private const int RunColumn = 5;
     private const int RemoveColumn = 6;
-    private readonly ActivityGrid jobs = new() { AccessibleName = "Archive queue items" };
+    private readonly ActivityGrid jobs = new() { AccessibleName = "Queue items" };
     private readonly Label summary = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private readonly Button removeFinished = DarkTheme.Button("Remove all finished", ActionIcon.Trash);
     private readonly ToolStripMenuItem browseRecovery = new("Choose recovery folder…");
@@ -18,10 +18,11 @@ internal sealed class ArchiveQueuePanel : UserControl
     };
     private bool recoveryAvailable;
     private DataGridViewRow? runningRow;
+    private TransferJob? directUpload;
 
     public ArchiveQueuePanel()
     {
-        AccessibleName = "Archive queue";
+        AccessibleName = "Transfer queue";
         BackColor = DarkTheme.Panel;
         Dock = DockStyle.Fill;
         Padding = new Padding(12, 8, 12, 8);
@@ -44,7 +45,7 @@ internal sealed class ArchiveQueuePanel : UserControl
         layout.Controls.Add(jobs, 0, 1);
         Controls.Add(layout);
 
-        jobs.AddTextColumn("Archive", 210, fill: true);
+        jobs.AddTextColumn("File or archive", 210, fill: true);
         jobs.AddTextColumn("SURF destination", 280, fill: true);
         jobs.AddTextColumn("Status", 121);
         jobs.AddProgressColumn(131);
@@ -65,7 +66,11 @@ internal sealed class ArchiveQueuePanel : UserControl
         timer.Tick += (_, _) =>
         {
             if (runningRow?.Tag is ArchiveQueueItem item)
+            {
                 runningRow.Cells[TimeColumn].Value = FormatElapsed(item);
+                if (item.DirectUpload && directUpload is { } upload)
+                    runningRow.Cells[ProgressColumn].Value = Math.Min(upload.Snapshot().Percent ?? 0, 99);
+            }
         };
         ShowItems([]);
     }
@@ -82,6 +87,8 @@ internal sealed class ArchiveQueuePanel : UserControl
     }
 
     public int HorizontalScrollbarHeight => jobs.HorizontalScrollbarHeight;
+
+    public void TrackDirectUpload(TransferJob? job) => directUpload = job;
 
     public static int HeightFor(int count) => count == 0 ? EmptyHeight
         : EmptyHeight + ActivityGrid.HeaderHeight + ActivityGrid.ItemHeight * Math.Min(count, 4) + 6;
@@ -100,7 +107,7 @@ internal sealed class ArchiveQueuePanel : UserControl
     public void ShowItems(IReadOnlyList<ArchiveQueueItem> items)
     {
         var counts = items.GroupBy(item => item.State).ToDictionary(group => group.Key, group => group.Count());
-        summary.Text = items.Count == 0 ? "No archives queued" : string.Join("  ·  ", counts.OrderBy(pair => pair.Key)
+        summary.Text = items.Count == 0 ? "No jobs queued" : string.Join("  ·  ", counts.OrderBy(pair => pair.Key)
             .Select(pair => $"{pair.Value:N0} {(pair.Key == ArchiveQueueState.Queued ? "waiting" : pair.Key.ToString().ToLowerInvariant())}"));
         removeFinished.Enabled = counts.ContainsKey(ArchiveQueueState.Finished);
         jobs.Visible = items.Count > 0;
@@ -115,7 +122,7 @@ internal sealed class ArchiveQueuePanel : UserControl
         foreach (var item in items)
         {
             var progress = item.Progress;
-            int totalSteps = progress?.Total ?? ArchiveQueue.ArchiveSteps;
+            int totalSteps = progress?.Total ?? item.Steps;
             int steps = item.State == ArchiveQueueState.Finished ? totalSteps : progress?.Completed ?? 0;
             int percent = (int)(100L * steps / totalSteps);
             var row = jobs.Rows[jobs.Rows.Add(item.Name, item.RemotePath, item.State.ToString(), percent, FormatElapsed(item))];
@@ -124,9 +131,10 @@ internal sealed class ArchiveQueuePanel : UserControl
                 runningRow = row;
             if (item.LocalName == selectedId)
                 selection = row;
-            row.Cells[0].ToolTipText = item.Source;
+            row.Cells[0].ToolTipText = item.DirectUpload
+                ? $"Direct upload\n{Path.Combine(item.Source, item.Name)}" : item.Source;
             row.Cells[1].ToolTipText = item.RemotePath;
-            row.Cells[ProgressColumn].ToolTipText = $"{steps} of {totalSteps} steps complete";
+            row.Cells[ProgressColumn].ToolTipText = item.DirectUpload ? "Direct upload progress" : $"{steps} of {totalSteps} steps complete";
             row.Cells[TimeColumn].ToolTipText = "Total running time, including waits during the job";
             row.Cells[2].ToolTipText = string.Join(Environment.NewLine,
                 new[] { item.Detail, item.RecoveryPath is { } path && item.State is ArchiveQueueState.Interrupted

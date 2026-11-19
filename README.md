@@ -12,7 +12,7 @@ After sign-in, both panes reopen their last visited folders when available. Othe
 4. **Activity** shows the action, progress and elapsed time for each row. It shows four rows at a time and scrolls when more are available. SFTP transfers also show their copy time. Byte rates and ETA appear where the app has enough information to calculate them.
 5. Select files or folders on either side and use **Remove…** to review the exact location and names. Removal is permanent. Removing a folder also removes its contents. **Cancel** is the default.
 
-You can create folders and remove unrelated files on SURF during a transfer. The app protects paths used by the transfer and refreshes the SURF listing when it creates an archive destination in the open folder. It also refreshes the visible Local / NAS source after removing archived originals.
+You can remove unrelated files or folders on either side during a transfer, and create folders on SURF. The app protects paths used by the transfer and local sources reserved by queued jobs. It refreshes the SURF listing when it creates an archive destination in the open folder, and refreshes the visible Local / NAS source after removing archived originals.
 
 Both browsers stay available during transfers, including **Recent**, folder navigation, refresh, filters and previews. A transfer keeps the source files and destination it was started with.
 
@@ -26,7 +26,7 @@ The app uses SFTP on port 22 and verifies the [host keys published by SURF](http
 
 Select only folders or only files in **Local / NAS**. Use **Archive to SURF** to confirm and queue the selection. Each selected folder becomes a separate queue entry and keeps its name on SURF. Selected files form one archive with the name you enter. Existing destination folders are never overwritten or merged.
 
-The **Queue** above **Activity** saves archive jobs and their settings locally for each SURF account. After sign-in, waiting jobs start automatically in queue order. Paused jobs stay paused until you use the resume icon. The app scans each selected folder when its job starts, so the archive contains the files found at that point. Selected loose files must still match their listed sizes and modification times.
+The **Queue** above **Activity** saves archive and direct upload jobs locally for each SURF account. **Upload to SURF** adds one job per selected file, even while a transfer is running. After sign-in, waiting jobs start automatically in queue order. Paused jobs stay paused until you use the resume icon. The app scans each selected folder when its job starts, so the archive contains the files found at that point. Selected loose files must still match their listed sizes and modification times.
 
 You can keep browsing and use **Archive to SURF** to add another selection while a scan or transfer runs. **Scan source** is the first step in **Activity**. It counts files and folders, checks staging space and reports elapsed time. The bottom status bar also shows the size of the files found so far. To stop a scan, use **Cancel activity**.
 
