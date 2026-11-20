@@ -33,7 +33,7 @@ You can keep browsing and use **Archive to SURF** to add another selection while
 
 The size shown during a scan is the combined size of the files found so far. Deep folder trees can take time to enumerate on a NAS even when their early files are small.
 
-Queue progress advances as archive steps complete. The total running time includes waits while the job is active and stays visible after it finishes, including after an app restart. The queue shows up to four rows before it scrolls.
+The queue displays the running job first and lists the other jobs newest first. Waiting jobs still run in the order they were added. Queue progress advances as archive steps complete. The total running time includes waits while the job is active and stays visible after it finishes, including after an app restart. The queue shows up to four rows before it scrolls.
 
 Finished jobs stay visible across restarts. Double-click **Failed** in the queue or in an archive activity row to read the error. Use the trash icon to remove one entry or **Remove all finished** to clear all successful jobs from the queue. Both actions leave the archived data on SURF. Use **Cancel activity** to stop the running job. A job that was running when the app closed appears as **Interrupted**. Its **Resume archive upload** icon uses the saved recovery folder and asks you to confirm the SURF destination. The same icon is available for failed or cancelled jobs with a saved staging path.
 

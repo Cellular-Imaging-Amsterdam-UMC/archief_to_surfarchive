@@ -126,7 +126,7 @@ internal sealed class ArchiveQueuePanel : UserControl
         runningRow = null;
         jobs.SuspendLayout();
         jobs.Rows.Clear();
-        foreach (var item in items)
+        foreach (var item in items.Reverse().OrderByDescending(item => item.State == ArchiveQueueState.Running))
         {
             var progress = item.Progress;
             int totalSteps = progress?.Total ?? item.Steps;
