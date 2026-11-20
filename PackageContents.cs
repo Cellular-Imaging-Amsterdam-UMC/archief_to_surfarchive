@@ -7,12 +7,64 @@ namespace SurfArchive;
 
 internal static class PackageContents
 {
-    public const string TextName = "contents.txt";
-    public const string HtmlName = "contents.html";
+    public const string Prefix = "__sda_";
+    public const string TextName = Prefix + "contents.txt";
+    public const string HtmlName = Prefix + "contents.html";
+
+    public static string? LocalReferencePath(string source, IReadOnlyList<ArchiveEntry> selected) =>
+        selected is [{ IsDirectory: true } folder] ? Path.Combine(source, Prefix + folder.Name) : null;
+
+    public static string LocalReferenceStagingPath(string reference, string jobId) =>
+        Path.Combine(Path.GetDirectoryName(reference)!, $".{jobId}-metadata");
+
+    public static void WriteLocalReference(string reference, string jobId, ArchivePart[] contents,
+        Func<string, SafeFileHandle> openVerified, Action<PackageMeter> report, CancellationToken token)
+    {
+        report(new(PackageStep.LocalReference, 0, contents.Length, CountItems: true));
+        string staging = LocalReferenceStagingPath(reference, jobId);
+        if (Path.Exists(reference) || Path.Exists(staging))
+            throw new IOException($"The local archive reference already exists at {reference} or {staging}.");
+        Directory.CreateDirectory(staging);
+        var written = new List<string>(contents.Length);
+        bool published = false;
+        try
+        {
+            foreach (var part in contents)
+            {
+                token.ThrowIfCancellationRequested();
+                string path = Path.Combine(staging, part.Name);
+                using var input = new HashingFileStream(openVerified(part.Name), null, token);
+                using (var copy = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    written.Add(path);
+                    input.CopyTo(copy);
+                    if (input.ReadBytes != part.Size || !input.Finish().Equals(part.Sha256, StringComparison.OrdinalIgnoreCase))
+                        throw new IOException($"The verified metadata changed while making the local copy of {part.Name}.");
+                    copy.Flush(flushToDisk: true);
+                }
+                report(new(PackageStep.LocalReference, written.Count, contents.Length, CountItems: true));
+            }
+            token.ThrowIfCancellationRequested();
+            Directory.Move(staging, reference);
+            published = true;
+            report(new(PackageStep.LocalReference, contents.Length, contents.Length, CountItems: true,
+                Finished: true, Message: $"Local archive reference saved to {reference}."));
+        }
+        finally
+        {
+            if (!published)
+            {
+                foreach (string path in written)
+                    try { File.Delete(path); } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+                try { Directory.Delete(staging, recursive: false); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
+        }
+    }
 
     public static ArchivePart[] Write(string folder, string name, PackagePlan plan, ArchivePart[] volumes,
         RetentionMetadata retention, Action<PackageMeter> report, CancellationToken token,
-        Action<string, SafeFileHandle>? holdVerified = null)
+        Action<string, SafeFileHandle>? holdVerified = null, string? remotePath = null)
     {
         long done = 0, total = plan.Entries.Count;
         report(new(PackageStep.Index, done, total, CountItems: true));
@@ -25,7 +77,7 @@ internal static class PackageContents
             using (var text = new StreamWriter(textFile, new UTF8Encoding(false), leaveOpen: true))
             using (var html = new StreamWriter(htmlFile, new UTF8Encoding(false), leaveOpen: true))
             {
-                WriteHeaders(text, html, name, plan, volumes);
+                WriteHeaders(text, html, name, plan, volumes, remotePath);
                 WriteRestore(html, volumes);
                 WriteRetention(html, retention);
                 html.WriteLine("""<section class="card" aria-label="Archive tree"><h2>Folder tree</h2><ul class="tree">""");
@@ -95,11 +147,14 @@ internal static class PackageContents
         }
     }
 
-    private static void WriteHeaders(StreamWriter text, StreamWriter html, string name, PackagePlan plan, ArchivePart[] volumes)
+    private static void WriteHeaders(StreamWriter text, StreamWriter html, string name, PackagePlan plan, ArchivePart[] volumes,
+        string? remotePath)
     {
         int folders = plan.Entries.Count(entry => entry.IsDirectory);
         int files = plan.Entries.Count - folders;
         text.WriteLine(name);
+        if (remotePath is not null)
+            text.WriteLine($"SURF Data Archive   {remotePath}");
         text.WriteLine($"{files} files, {folders} folders, {plan.Bytes} source bytes, {volumes.Length} ZIP parts");
         text.WriteLine($"Restore: download all parts to one folder and open {volumes[0].Name} in 7-Zip. Select Extract.");
         text.WriteLine();
@@ -156,7 +211,10 @@ internal static class PackageContents
             .document::after{content:"";position:absolute;left:2px;right:2px;top:.35rem;border-top:1px solid #88a4c2;box-shadow:0 2px #88a4c2}
             </style></head><body><main><header><div class="overline">SURF Data Archive · Contents</div>
             """);
-        html.WriteLine($"<h1>{Escape(name)}</h1><div class=\"metrics\"><span>{files:N0} files</span><span>{folders:N0} folders</span><span>{TransferJob.FormatBytes(plan.Bytes)} source data</span><span>{volumes.Length:N0} compressed parts</span></div></header>");
+        html.WriteLine($"<h1>{Escape(name)}</h1><div class=\"metrics\"><span>{files:N0} files</span><span>{folders:N0} folders</span><span>{TransferJob.FormatBytes(plan.Bytes)} source data</span><span>{volumes.Length:N0} compressed parts</span></div>");
+        if (remotePath is not null)
+            html.WriteLine($"<p>SURF Data Archive <code>{Escape(remotePath)}</code></p>");
+        html.WriteLine("</header>");
     }
 
     private static void WriteRestore(StreamWriter html, ArchivePart[] volumes)
@@ -170,7 +228,7 @@ internal static class PackageContents
             </ol>
             <p><a href="https://www.7-zip.org/">Official 7-Zip website</a></p>
             <details><summary>Archive parts ({{volumes.Length:N0}})</summary>
-            <p>See <code>contents.txt</code> for the complete list in restore order, with SHA-256 checksums.</p>
+            <p>See <code>{{TextName}}</code> for the complete list in restore order, with SHA-256 checksums.</p>
             <ol>
             """);
         foreach (var part in volumes.Take(9))
@@ -192,10 +250,10 @@ internal static class PackageContents
     {
         html.WriteLine("""<section class="card retention"><h2>Archive retention</h2>""");
         WriteRetentionValues(html, retention);
-        html.WriteLine("""
-            <p>To change these values, double-click <code>retention.json</code> in the SURF pane of <strong>SurfDataArchiveTransfer</strong>, edit the fields and choose <strong>Save to SURF</strong>. If the file is on tape, the editor opens after it is restored.</p>
+        html.WriteLine($$"""
+            <p>To change these values, double-click <code>{{RetentionMetadata.FileName}}</code> in the SURF pane of <strong>SurfDataArchiveTransfer</strong>, edit the fields and choose <strong>Save to SURF</strong>. If the file is on tape, the editor opens after it is restored.</p>
             <p>This page starts with the values recorded at archiving. To refresh the display after an edit, download the current file and select it below.</p>
-            <label for="retention-file">Load current <code>retention.json</code></label><br>
+            <label for="retention-file">Load current <code>{{RetentionMetadata.FileName}}</code></label><br>
             <input id="retention-file" type="file" accept=".json,application/json">
             <p id="retention-status" role="status"></p>
             </section>
@@ -208,8 +266,8 @@ internal static class PackageContents
                 const file = input.files[0];
                 if (!file) return;
                 try {
-                  if (file.name.toLowerCase() !== "retention.json" || file.size > 256 * 1024)
-                    throw new Error("Select the retention.json file from this archive.");
+                  if (file.name.toLowerCase() !== "{{RetentionMetadata.FileName}}" || file.size > 256 * 1024)
+                    throw new Error("Select the {{RetentionMetadata.FileName}} file from this archive.");
                   const data = JSON.parse((await file.text()).replace(/^\uFEFF/, ""));
                   if (!data || !Number.isInteger(data.minimum_years) || data.minimum_years < 1 || data.minimum_years > 999)
                     throw new Error("This file does not contain a valid retention period.");
@@ -220,9 +278,9 @@ internal static class PackageContents
                     return value || "—";
                   });
                   fields.forEach((field, index) => { field.textContent = values[index]; });
-                  status.textContent = "Showing the selected retention.json.";
+                  status.textContent = "Showing the selected {{RetentionMetadata.FileName}}.";
                 } catch (error) {
-                  status.textContent = "Unable to load retention.json. " + error.message;
+                  status.textContent = "Unable to load {{RetentionMetadata.FileName}}. " + error.message;
                 } finally {
                   input.value = "";
                 }

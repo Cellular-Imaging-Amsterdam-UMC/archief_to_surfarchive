@@ -162,9 +162,11 @@ internal sealed class TransferLog : UserControl
     private readonly List<string> activity = [];
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 300 };
     private readonly Dictionary<TransferJob, DataGridViewRow> activeRows = [];
+    private readonly SessionLog? session;
 
-    public TransferLog()
+    public TransferLog(SessionLog? session = null)
     {
+        this.session = session;
         Dock = DockStyle.Fill;
         BackColor = DarkTheme.Panel;
         Padding = new Padding(12, 8, 12, 8);
@@ -194,6 +196,13 @@ internal sealed class TransferLog : UserControl
         jobs.AddTextColumn("Copy time", 88);
         jobs.AddTextColumn("Elapsed", 75);
         jobs.SelectionChanged += (_, _) => SelectionChanged?.Invoke();
+        jobs.CellDoubleClick += (_, e) =>
+        {
+            if (e.RowIndex >= 0 && e.ColumnIndex == 2 &&
+                jobs.Rows[e.RowIndex].Tag is TransferJob job && job.Snapshot().State == TransferState.Failed &&
+                jobs.Rows[e.RowIndex].Cells[2].ToolTipText is { Length: > 0 } detail)
+                MessageBox.Show(this, detail, job.Direction, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        };
         timer.Tick += (_, _) =>
         {
             foreach (var row in activeRows.Values)
@@ -214,6 +223,7 @@ internal sealed class TransferLog : UserControl
 
     public void Add(TransferJob job)
     {
+        session?.Write($"{job.Direction} · {job.Name} · Started\n{string.Join(Environment.NewLine, job.Notes)}");
         var row = new DataGridViewRow { Tag = job, Height = jobs.RowTemplate.Height };
         row.CreateCells(jobs, job.Name, job.Direction);
         jobs.Rows.Insert(0, row);
@@ -226,11 +236,17 @@ internal sealed class TransferLog : UserControl
         UpdateSummary();
     }
 
-    public void Finish(TransferJob job, TransferState state)
+    public void Finish(TransferJob job, TransferState state, string? detail = null)
     {
         job.Finish(state);
+        string elapsed = TransferJob.FormatTime(job.Snapshot().Elapsed);
+        session?.Write($"{job.Direction} · {job.Name} · {state} · {elapsed}" + (detail is null ? "" : $"\n{detail}"));
         if (activeRows.Remove(job, out var row))
+        {
+            if (detail is not null)
+                row.Cells[2].ToolTipText = detail;
             UpdateRow(row);
+        }
         UpdateSummary();
     }
 
@@ -242,6 +258,7 @@ internal sealed class TransferLog : UserControl
 
     public void Log(string message, TransferJob? job = null)
     {
+        session?.Write(job is null ? message : $"{job.Direction} · {job.Name} · {message}");
         string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
         if (job is not null)
         {

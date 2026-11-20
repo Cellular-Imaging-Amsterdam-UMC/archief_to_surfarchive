@@ -9,7 +9,7 @@ internal sealed record RetentionFields(int Years = 10, string Notes = "", string
 
 internal sealed record RetentionMetadata(DateOnly? ArchivedOn, RetentionFields Fields)
 {
-    public const string FileName = "retention.json";
+    public const string FileName = PackageContents.Prefix + "retention.json";
     public const int MaximumYears = 999;
     public const int MaximumFileSize = 256 * 1024;
     private static readonly JsonSerializerOptions Pretty = new(JsonSerializerOptions.Default) { WriteIndented = true };
@@ -41,7 +41,7 @@ internal sealed record RetentionMetadata(DateOnly? ArchivedOn, RetentionFields F
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or FormatException or ArgumentException)
         {
-            throw new IOException("Could not read retention.json. " + error.Message, error);
+            throw new IOException($"Could not read {FileName}. {error.Message}", error);
         }
     }
 

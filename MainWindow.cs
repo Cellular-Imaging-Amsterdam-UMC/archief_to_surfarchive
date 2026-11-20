@@ -4,12 +4,12 @@ internal sealed class MainWindow : Form
 {
     private readonly BrowserPane windows = new("Local / NAS", local: true);
     private readonly BrowserPane surf = new("SURF Data Archive", local: false);
-    private readonly TransferLog transfers = new();
+    private readonly TransferLog transfers;
+    private readonly SessionLog? sessionLog;
     private readonly ArchiveQueue archiveQueue = new();
     private readonly ArchiveQueuePanel queuePanel = new();
     private readonly RowStyle queueHeight = new(SizeType.Absolute, ArchiveQueuePanel.EmptyHeight);
     private readonly RowStyle activityHeight = new(SizeType.Absolute, TransferLog.DisplayHeight);
-    private readonly Button signIn = DarkTheme.Button("Sign out", ActionIcon.SignOut);
     private readonly Button upload = DarkTheme.Button("Upload to SURF", ActionIcon.Upload, primary: true);
     private readonly Button download = DarkTheme.Button("Download", ActionIcon.Download, primary: true);
     private readonly Button restore = DarkTheme.Button("Restore from tape", ActionIcon.Tape);
@@ -17,10 +17,12 @@ internal sealed class MainWindow : Form
     private readonly Button removeWindows = DarkTheme.Button("Remove…", ActionIcon.Trash);
     private readonly Button removeSurf = DarkTheme.Button("Remove…", ActionIcon.Trash);
     private readonly Button newFolder = DarkTheme.Button("New folder", ActionIcon.FolderPlus);
-    private readonly Label connection = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Mint);
+    private readonly Button logs = DarkTheme.Button("Logs", ActionIcon.Browse);
     private readonly Label feedback = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private readonly System.Windows.Forms.Timer scanTimer = new() { Interval = 200 };
     private ActiveArchiveScan? activeArchiveScan;
+    private LogWindow? logWindow;
+    private Dictionary<string, ArchiveQueueItem> loggedQueue = new(StringComparer.Ordinal);
     private ArchiveSession? archive;
     private CancellationTokenSource? operation;
     private CancellationTokenSource? archiveOperation;
@@ -43,11 +45,14 @@ internal sealed class MainWindow : Form
     private string feedbackMessage = "";
     private bool feedbackIsError;
 
-    public MainWindow(ArchiveSession? session)
+    public MainWindow(ArchiveSession? session, SessionLog? sessionLog = null)
     {
         archive = session;
+        this.sessionLog = sessionLog;
+        transfers = new(sessionLog);
         DarkTheme.Window(this);
-        Text = "SurfDataArchiveTransfer";
+        Text = session is null ? "SurfDataArchiveTransfer"
+            : $"SurfDataArchiveTransfer · SFTP connected · {ArchiveSession.Host}";
         MinimumSize = new Size(1040, 660);
         ClientSize = new Size(1410, 850);
         StartPosition = FormStartPosition.CenterScreen;
@@ -74,7 +79,6 @@ internal sealed class MainWindow : Form
         surf.OpenFile += file => OpenPreview(file, local: false);
         windows.SelectionChanged += UpdateControls;
         surf.SelectionChanged += UpdateControls;
-        signIn.Click += async (_, _) => await Run(ToggleLogin);
         upload.Click += (_, _) => UploadDirect();
         download.Click += async (_, _) => await DownloadSelected();
         restore.Click += (_, _) => StartRestores();
@@ -84,6 +88,7 @@ internal sealed class MainWindow : Form
         removeWindows.AccessibleName = "Remove selected Local / NAS items";
         removeSurf.AccessibleName = "Remove selected SURF items";
         newFolder.Click += async (_, _) => await MakeFolder();
+        logs.Click += (_, _) => OpenLogs();
         transfers.CancelRequested += CancelSelectedActivity;
         transfers.SelectionChanged += UpdateControls;
         transfers.HorizontalScrollbarChanged += (_, _) => SchedulePanelResize();
@@ -91,6 +96,7 @@ internal sealed class MainWindow : Form
         SizeChanged += (_, _) => SchedulePanelResize();
         archiveQueue.Changed += () =>
         {
+            LogQueueChanges();
             queuePanel.ShowItems(archiveQueue.Items);
             FitActivityPanels();
             UpdateControls();
@@ -141,26 +147,13 @@ internal sealed class MainWindow : Form
 
     private void BuildLayout()
     {
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 6, Margin = Padding.Empty };
-        foreach (int height in new[] { 38, -1, 35 })
-            layout.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
+        layout.RowStyles.Add(new(SizeType.Percent, 100));
+        layout.RowStyles.Add(new(SizeType.Absolute, 35));
         layout.RowStyles.Add(queueHeight);
         layout.RowStyles.Add(activityHeight);
         layout.RowStyles.Add(new(SizeType.Absolute, 32));
         Controls.Add(layout);
-
-        var header = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = DarkTheme.Panel,
-            Padding = new Padding(15, 5, 12, 3), Margin = new Padding(0, 0, 0, 3)
-        };
-        header.ColumnStyles.Add(new(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new(SizeType.AutoSize));
-        header.ColumnStyles.Add(new(SizeType.AutoSize));
-        connection.Margin = new Padding(0, 5, 17, 0);
-        header.Controls.Add(connection, 1, 0);
-        header.Controls.Add(signIn, 2, 0);
-        layout.Controls.Add(header, 0, 0);
 
         var panes = new TableLayoutPanel
         {
@@ -170,26 +163,71 @@ internal sealed class MainWindow : Form
         panes.ColumnStyles.Add(new(SizeType.Percent, 50));
         panes.Controls.Add(windows, 0, 0);
         panes.Controls.Add(surf, 1, 0);
-        layout.Controls.Add(panes, 0, 1);
+        layout.Controls.Add(panes, 0, 0);
 
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(13, 5, 13, 1) };
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
         actions.Controls.Add(DarkTheme.Row(package, upload, removeWindows), 0, 0);
         actions.Controls.Add(DarkTheme.Row(download, restore, newFolder, removeSurf), 1, 0);
-        layout.Controls.Add(actions, 0, 2);
+        layout.Controls.Add(actions, 0, 1);
 
         queuePanel.Margin = new Padding(13, 0, 13, 4);
-        layout.Controls.Add(queuePanel, 0, 3);
+        layout.Controls.Add(queuePanel, 0, 2);
         transfers.Margin = new Padding(13, 0, 13, 0);
-        layout.Controls.Add(transfers, 0, 4);
+        layout.Controls.Add(transfers, 0, 3);
         feedback.AutoSize = false;
         feedback.AutoEllipsis = true;
         feedback.UseMnemonic = false;
         feedback.TextAlign = ContentAlignment.MiddleLeft;
         feedback.Dock = DockStyle.Fill;
-        feedback.Margin = new Padding(14, 2, 13, 2);
-        layout.Controls.Add(feedback, 0, 5);
+        feedback.Margin = Padding.Empty;
+        var statusBar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(14, 2, 13, 2)
+        };
+        statusBar.ColumnStyles.Add(new(SizeType.Percent, 100));
+        statusBar.ColumnStyles.Add(new(SizeType.AutoSize));
+        statusBar.RowStyles.Add(new(SizeType.Percent, 100));
+        logs.Margin = new Padding(8, 0, 0, 0);
+        statusBar.Controls.Add(feedback, 0, 0);
+        statusBar.Controls.Add(logs, 1, 0);
+        layout.Controls.Add(statusBar, 0, 4);
+    }
+
+    private void OpenLogs()
+    {
+        if (logWindow is { IsDisposed: false } existing)
+        {
+            if (existing.WindowState == FormWindowState.Minimized)
+                existing.WindowState = FormWindowState.Normal;
+            existing.Activate();
+            return;
+        }
+        logWindow = new LogWindow(sessionLog);
+        logWindow.Show(this);
+    }
+
+    private void LogQueueChanges()
+    {
+        if (sessionLog is null)
+            return;
+        if (!archiveQueue.IsAvailable)
+        {
+            loggedQueue.Clear();
+            return;
+        }
+        var next = archiveQueue.Items.ToDictionary(item => item.LocalName, StringComparer.Ordinal);
+        foreach (var item in next.Values)
+        {
+            if (loggedQueue.TryGetValue(item.LocalName, out var previous) && previous.State == item.State)
+                continue;
+            sessionLog.Write($"Queue · {item.Name} · {item.State} · {item.Source} → {item.RemotePath}" +
+                (item.Detail is null ? "" : $"\n{item.Detail}"));
+        }
+        foreach (var item in loggedQueue.Values.Where(item => !next.ContainsKey(item.LocalName)))
+            sessionLog.Write($"Queue · {item.Name} · Removed from queue");
+        loggedQueue = next;
     }
 
     private async Task<ArchiveRequest> ScanArchive(ArchiveQueueItem item, CancellationToken token)
@@ -217,7 +255,7 @@ internal sealed class MainWindow : Form
             bool cancelled = error is OperationCanceledException && token.IsCancellationRequested;
             if (!cancelled)
                 transfers.Log(error.Message, job);
-            transfers.Finish(job, cancelled ? TransferState.Cancelled : TransferState.Failed);
+            transfers.Finish(job, cancelled ? TransferState.Cancelled : TransferState.Failed, cancelled ? null : error.Message);
             throw;
         }
         finally
@@ -316,6 +354,7 @@ internal sealed class MainWindow : Form
             if (!closeWhenIdle && version == localListingVersion)
             {
                 windows.ShowFolder(full, root, entries);
+                sessionLog?.Write($"Local / NAS · Opened {full}");
                 UpdateControls();
             }
         }
@@ -338,6 +377,7 @@ internal sealed class MainWindow : Form
             if (version != surfListingVersion || session != archive || closeWhenIdle)
                 return;
             surf.ShowFolder(path, root, entries);
+            sessionLog?.Write($"SURF · Opened {path}");
             UpdateControls();
             _ = LoadArchiveStatuses(path, entries.ToArray());
         }
@@ -391,6 +431,7 @@ internal sealed class MainWindow : Form
             if (!IsCurrent() || result is not { } listing)
                 return;
             pane.ShowFolder(listing.Path, folder.RootLabel, listing.Content, listing.Ancestors);
+            sessionLog?.Write($"{(local ? "Local / NAS" : "SURF")} · Opened recent folder {listing.Path}");
             UpdateControls();
             if (!local)
                 _ = LoadArchiveStatuses(listing.Path, listing.Content.ToArray());
@@ -497,32 +538,6 @@ internal sealed class MainWindow : Form
             if (statusLookup == lookup)
                 statusLookup = null;
         }
-    }
-
-    private async Task ToggleLogin(CancellationToken token)
-    {
-        if (archive is not null)
-        {
-            archiveQueue.Detach();
-            StopStatusLookup();
-            StopRestores();
-            var currentArchive = archive;
-            archive = null;
-            surf.SetHistory(null);
-            surf.ClearFolder();
-            await Task.Run(currentArchive.Dispose);
-            SetFeedback("Signed out of SURF Data Archive.");
-            return;
-        }
-
-        using var login = new LoginDialog { StartPosition = FormStartPosition.CenterParent };
-        if (login.ShowDialog(this) != DialogResult.OK)
-            return;
-
-        archive = login.TakeSession();
-        surf.SetHistory(new RecentFolders(archive.Root));
-        SetFeedback("");
-        await Task.WhenAll(LoadSurfLocation(archive.Root), LoadArchiveQueue(archive.Root, token));
     }
 
     private async Task LoadArchiveQueue(string root, CancellationToken token)
@@ -820,11 +835,11 @@ internal sealed class MainWindow : Form
                 }
                 if (openContents)
                 {
-                    transfers.Log("Checking the current retention.json before opening contents.html.", job);
+                    transfers.Log($"Checking the current {RetentionMetadata.FileName} before opening {PackageContents.HtmlName}.", job);
                     var (metadata, status) = await ReadCompanionRetention(local);
                     bool rendered = await Task.Run(() => ContentsPreview.AddRetention(localPath, metadata, status, token));
                     if (!rendered && !IsDisposed)
-                        transfers.Log("This contents.html format does not support the retention preview.", job);
+                        transfers.Log("This contents file format does not support the retention preview.", job);
                 }
                 token.ThrowIfCancellationRequested();
                 if (IsDisposed)
@@ -907,14 +922,14 @@ internal sealed class MainWindow : Form
             string localPath = Path.Combine(localFolder, name);
             job.SetPhase(TransferState.CheckingStatus);
             if (operation is null)
-                SetFeedback("Checking retention.json before opening contents.html…");
+                SetFeedback($"Checking {RetentionMetadata.FileName} before opening {PackageContents.HtmlName}…");
             try
             {
                 bool exists = await Task.Run(() => session.HasRetentionForPreview(remotePath, token));
                 token.ThrowIfCancellationRequested();
                 if (!exists)
                 {
-                    const string missing = "This SURF folder has no retention.json.";
+                    const string missing = "This SURF folder has no " + RetentionMetadata.FileName + ".";
                     transfers.Log(missing, job);
                     return (null, missing);
                 }
@@ -927,14 +942,14 @@ internal sealed class MainWindow : Form
                     return RetentionMetadata.Read(localPath).Metadata;
                 });
                 token.ThrowIfCancellationRequested();
-                transfers.Log("Read the current retention.json from the same SURF folder.", job);
-                return (metadata, "Read from retention.json in this SURF folder when the preview was opened.");
+                transfers.Log($"Read the current {RetentionMetadata.FileName} from the same SURF folder.", job);
+                return (metadata, $"Read from {RetentionMetadata.FileName} in this SURF folder when the preview was opened.");
             }
             catch (Exception error) when (!token.IsCancellationRequested)
             {
                 if (!IsDisposed)
-                    transfers.Log($"Could not read retention.json. {error.Message}", job);
-                return (null, "The current retention.json could not be read. See Activity in SurfDataArchiveTransfer.");
+                    transfers.Log($"Could not read {RetentionMetadata.FileName}. {error.Message}", job);
+                return (null, $"Could not read the current {RetentionMetadata.FileName}. See Activity in SurfDataArchiveTransfer.");
             }
             finally
             {
@@ -1100,7 +1115,8 @@ internal sealed class MainWindow : Form
                     ChangeQueue(() => archiveQueue.CompleteSteps(item.LocalName, ArchiveQueue.ScanSteps));
                     await RunPackage(request.Name, request.LocalPath, request.RemotePath, (target, progress) =>
                         ArchivePackage.Create(request.Plan, request.LocalName, request.Name, request.Parent,
-                            target, options, progress, token), token, item.LocalName, startingSteps: ArchiveQueue.ScanSteps);
+                            target, options, progress, token, localReference: item.LocalReferencePath),
+                        token, item.LocalName, startingSteps: ArchiveQueue.ScanSteps);
                 }
                 outcome = ArchiveQueueState.Finished;
                 transfers.Log($"{item.Name} was uploaded and verified.");
@@ -1122,7 +1138,7 @@ internal sealed class MainWindow : Form
             }
 
             bool saved = ChangeQueue(() => archiveQueue.Finish(item.LocalName, outcome, detail));
-            if (request is not null && item.Options?.RemoveOriginals == true)
+            if (request is not null && (item.LocalReferencePath is not null || item.Options?.RemoveOriginals == true))
                 await RefreshArchiveSource(request);
             if (saved && outcome == ArchiveQueueState.Finished)
                 await RefreshAfterArchive(item);
@@ -1298,12 +1314,19 @@ internal sealed class MainWindow : Form
         {
             bool cancelled = error is OperationCanceledException && token.IsCancellationRequested;
             string message = Directory.Exists(recovery) ? $"Local package folder kept: {recovery}" : "No package folder was created.";
+            if (stages.Count == 0 && !cancelled)
+            {
+                var failed = new TransferJob(name, "Archive job", recovery, destination, 0, totalKnown: false);
+                transfers.Add(failed);
+                transfers.Finish(failed, TransferState.Failed, $"{error.Message}\n\n{message}");
+            }
             foreach (var stage in stages.Values)
             {
                 if (!cancelled && !stage.Notes.Any(note => note.EndsWith(error.Message, StringComparison.Ordinal)))
                     transfers.Log(error.Message, stage);
                 transfers.Log(message, stage);
-                transfers.Finish(stage, cancelled ? TransferState.Cancelled : TransferState.Failed);
+                transfers.Finish(stage, cancelled ? TransferState.Cancelled : TransferState.Failed,
+                    cancelled ? null : $"{error.Message}\n\n{message}");
             }
             transfers.Log(message);
             if (cancelled)
@@ -1363,7 +1386,8 @@ internal sealed class MainWindow : Form
     {
         PackageStep.Archive => ("Compress source", "Compressing", "Compresses large files with up to eight workers.", true),
         PackageStep.Verify => ("Check local archive", "Checking", "Checks every archive part. For new archives, decodes large files in parallel and checks the SHA-256 of every complete file against its source.", true),
-        PackageStep.Index => ("Write archive metadata", "Writing", "Items indexed for the contents files. Also writes retention.json.", false),
+        PackageStep.Index => ("Write archive metadata", "Writing", "Items indexed for the contents files and retention metadata.", false),
+        PackageStep.LocalReference => ("Save local reference", "Saving", "Copies the verified metadata to the __sda_ folder next to the source.", false),
         PackageStep.RemoveOriginals => ("Remove originals", "Removing", "Originals are removed after all SURF SHA-256 checks pass.", false),
         PackageStep.Upload => ("Upload to SURF", "Uploading", "Completed parts upload during packing. The final size includes compressed parts and metadata.", true),
         PackageStep.RemoteSha => ("Check SURF checksums", "Checking", "Package bytes covered by matching SHA-256 checksums. Updates after each file.", false),
@@ -1414,7 +1438,10 @@ internal sealed class MainWindow : Form
                 catch (Exception error)
                 {
                     failure ??= error.Message;
-                    transfers.Log($"Removal failed or incomplete for {item.Name}: {error.Message}");
+                    string path = session is null ? Path.Combine(directory, item.Name) : ArchiveSession.Child(directory, item.Name);
+                    transfers.Log($"Removal failed or incomplete for {path}. {error.Message}");
+                    if (session is null && item.IsDirectory && error is IOException io && LocalFiles.IsDirectoryNotEmpty(io))
+                        transfers.Log(await Task.Run(() => LocalFiles.DescribeNonEmptyDirectory(path)));
                 }
             }
             if (session is null && !closeWhenIdle && localBrowsing == 0 &&
@@ -1440,6 +1467,12 @@ internal sealed class MainWindow : Form
             if (job.State is not (ArchiveQueueState.Queued or ArchiveQueueState.Paused or ArchiveQueueState.Running))
                 continue;
             paths.AddRange(job.Selection.Select(item => Path.Combine(job.Source, item.Name)));
+            if (job.LocalReferencePath is { } reference)
+            {
+                paths.Add(reference);
+                if (job.State == ArchiveQueueState.Running)
+                    paths.Add(PackageContents.LocalReferenceStagingPath(reference, job.LocalName));
+            }
             if (job.State != ArchiveQueueState.Running || job.DirectUpload)
                 continue;
             if (job.RecoveryPath is { } staging)
@@ -1514,6 +1547,7 @@ internal sealed class MainWindow : Form
             if (IsSurfPathInUse(path))
                 throw new IOException("This folder path is in use by a SURF transfer. Choose a different name or location.");
             await Task.Run(() => session.MakeDirectory(path));
+            transfers.Log($"Created SURF folder {path}.");
             if (!closeWhenIdle && surfBrowsing == 0 && surf.PathShown == directory)
                 await NavigateRemote(directory, null);
             SetFeedback("Folder created.");
@@ -1652,11 +1686,6 @@ internal sealed class MainWindow : Form
         bool idle = operation is null && !editingSurf && !closeWhenIdle;
         bool transferIdle = idle && archiveOperation is null && !editingLocal;
         bool online = archive is not null;
-        signIn.Text = online ? "Sign out" : "Sign in";
-        DarkTheme.SetIcon(signIn, online ? ActionIcon.SignOut : ActionIcon.SignIn);
-        signIn.Enabled = transferIdle;
-        connection.Text = online ? "●  SFTP connected  ·  " + ArchiveSession.Host : "Disconnected";
-        connection.ForeColor = online ? DarkTheme.Mint : DarkTheme.Muted;
         windows.SetAvailable(CanBrowse, windows.HasFolder);
         surf.SetAvailable(CanBrowse && online, online && surf.HasFolder);
         var localSelection = windows.SelectedItems;
@@ -1683,6 +1712,8 @@ internal sealed class MainWindow : Form
 
     private void SetFeedback(string text, bool error = false)
     {
+        if (text.Length > 0 && (text != feedbackMessage || error != feedbackIsError))
+            sessionLog?.Write($"{(error ? "Error" : "Status")} · {text}");
         feedbackMessage = text;
         feedbackIsError = error;
         if (activeArchiveScan is null)

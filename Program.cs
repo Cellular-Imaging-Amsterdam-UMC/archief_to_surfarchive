@@ -10,28 +10,38 @@ internal static class Program
         CultureInfo.DefaultThreadCurrentCulture = CultureInfo.GetCultureInfo("en-GB");
         CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.GetCultureInfo("en-GB");
         ApplicationConfiguration.Initialize();
+        using var log = new SessionLog();
+        log.Write($"SurfDataArchiveTransfer {typeof(Program).Assembly.GetName().Version} started.");
 
         ArchiveSession session;
-        using (var login = new LoginDialog())
+        using (var login = new LoginDialog(log))
         {
             if (login.ShowDialog() != DialogResult.OK)
+            {
+                log.Write("App closed before sign-in.");
                 return 0;
+            }
             session = login.TakeSession();
         }
 
         if (args is ["--proef" or "--probe", var source, var logPath])
         {
             using (session)
-                return RunProbe(session, source, logPath);
+                return RunProbe(session, source, logPath, log);
         }
-        Application.Run(new MainWindow(session));
+        Application.Run(new MainWindow(session, log));
+        log.Write("App closed.");
         return 0;
     }
 
-    private static int RunProbe(ArchiveSession archive, string source, string logPath)
+    private static int RunProbe(ArchiveSession archive, string source, string logPath, SessionLog session)
     {
         using var writer = new StreamWriter(logPath, append: false) { AutoFlush = true };
-        void Log(string line) => writer.WriteLine($"{DateTimeOffset.Now:O} {line}");
+        void Log(string line)
+        {
+            writer.WriteLine($"{DateTimeOffset.Now:O} {line}");
+            session.Write(line);
+        }
 
         try
         {

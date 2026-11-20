@@ -13,6 +13,31 @@ internal static class LocalFiles
         name.StartsWith(".surfarchive-download-", StringComparison.OrdinalIgnoreCase) ||
         name.StartsWith(".surfarchive-folder-", StringComparison.OrdinalIgnoreCase);
 
+    public static bool IsDirectoryNotEmpty(IOException error) => (error.HResult & 0xFFFF) == 145;
+
+    public static string DescribeNonEmptyDirectory(string path, Func<string, bool>? wasScanned = null)
+    {
+        const int limit = 10;
+        try
+        {
+            var entries = new DirectoryInfo(path).EnumerateFileSystemInfos("*", ReadEntries).Take(limit + 1).ToArray();
+            if (entries.Length == 0)
+                return $"A fresh listing of {path}, including hidden items, found no entries. " +
+                    "A deferred SMB deletion or a change between the delete and the listing is possible.";
+            string found = string.Join(", ", entries.Take(limit).Select(entry =>
+            {
+                string known = wasScanned is null ? "" : wasScanned(entry.FullName) ? ", listed in source scan" : ", absent from source scan";
+                return $"\"{entry.Name}\" ({entry.Attributes}{known})";
+            }));
+            string more = entries.Length > limit ? " and more" : "";
+            return $"Directory inspection of {path} found these entries, including hidden and system entries. {found}{more}";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            return $"Could not inspect the contents of {path}. {error.Message}";
+        }
+    }
+
     public static bool PathsOverlap(string first, string second) =>
         PackageFiles.IsWithin(first, second) || PackageFiles.IsWithin(second, first);
 

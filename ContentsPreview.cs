@@ -45,8 +45,8 @@ internal static class ContentsPreview
                 if (retention is not null)
                 {
                     PackageContents.WriteRetentionValues(output, retention);
-                    output.WriteLine("""
-                        <p>To edit these details, double-click <code>retention.json</code> separately in the SURF pane of <strong>SurfDataArchiveTransfer</strong>.</p>
+                    output.WriteLine($$"""
+                        <p>To edit these details, double-click <code>{{RetentionMetadata.FileName}}</code> separately in the SURF pane of <strong>SurfDataArchiveTransfer</strong>.</p>
                         """);
                 }
                 output.WriteLine("</section>");

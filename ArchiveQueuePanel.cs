@@ -57,6 +57,13 @@ internal sealed class ArchiveQueuePanel : UserControl
             if (e.Button == MouseButtons.Left)
                 InvokeAction(e.RowIndex, e.ColumnIndex);
         };
+        jobs.CellDoubleClick += (_, e) =>
+        {
+            if (e.RowIndex >= 0 && e.ColumnIndex == 2 &&
+                jobs.Rows[e.RowIndex].Tag is ArchiveQueueItem { State: ArchiveQueueState.Failed } item &&
+                jobs.Rows[e.RowIndex].Cells[2].ToolTipText is { Length: > 0 } detail)
+                MessageBox.Show(this, detail, item.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        };
         jobs.KeyDown += (_, e) =>
         {
             if (e.KeyCode is Keys.Enter or Keys.Space && jobs.CurrentCell is { } cell &&

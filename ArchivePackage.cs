@@ -8,7 +8,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace SurfArchive;
 
-internal enum PackageStep { Archive = 1, Verify, RemoveOriginals, Upload, RemoteSha, RemoveParts, Index }
+internal enum PackageStep { Archive = 1, Verify, RemoveOriginals, Upload, RemoteSha, RemoveParts, Index, LocalReference }
 
 internal record PackageMeter(PackageStep Step, long Done, long Total, bool CountItems = false,
     bool Finished = false, bool Skipped = false, bool TotalKnown = true,
@@ -103,7 +103,7 @@ internal static class ArchivePackage
 
     public static async Task Create(PackagePlan plan, string name, string archiveName, string remoteParent,
         IPackageDestination target, PackageOptions options, Action<PackageMeter> report,
-        CancellationToken token, long partLimit = PartLimit)
+        CancellationToken token, long partLimit = PartLimit, string? localReference = null)
     {
         ValidateFolderName(archiveName);
         token.ThrowIfCancellationRequested();
@@ -111,6 +111,7 @@ internal static class ArchivePackage
         if (Path.Exists(folder) || partLimit < 4096 || partLimit > PartLimit)
             throw new IOException("The local package folder already exists or the volume size is invalid.");
         Directory.CreateDirectory(folder);
+        CleanupProgress cleanup;
         using (var jobLock = Lock(folder))
         {
             var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -132,7 +133,8 @@ internal static class ArchivePackage
                     frozen.HoldParts(folder, volumes);
                     VerifyZip(plan, volumes, frozen, hashes, written.Entries, codec, report, token);
                 }
-                var contents = PackageContents.Write(folder, archiveName, plan, volumes, options.Retention, report, token, frozen.Hold);
+                var contents = PackageContents.Write(folder, archiveName, plan, volumes, options.Retention, report, token,
+                    frozen.Hold, ArchiveSession.Child(remoteParent, archiveName));
                 parts = [.. volumes, .. contents];
                 SaveManifest(folder, new PackageManifest(target.Root, remoteParent, name, parts, archiveName,
                     IncludesRetention: true, SplitZip: true));
@@ -145,6 +147,10 @@ internal static class ArchivePackage
                 await upload;
                 // Keep the originals until all remote parts and metadata files match.
                 await VerifyRemote(parts, target, ReportStage, token);
+                if (localReference is not null)
+                    PackageContents.WriteLocalReference(localReference, name, contents, frozen.Get, report, token);
+                else
+                    report(new(PackageStep.LocalReference, 0, 0, CountItems: true, Finished: true, Skipped: true));
                 if (originals is not null)
                     RemoveOriginals(plan, hashes, originals, report, token);
                 else
@@ -158,7 +164,7 @@ internal static class ArchivePackage
                 catch (Exception) { /* Preserve the original error from packing, verification or upload. */ }
             }
 
-            RemoveLocalParts(folder, parts, frozen, report, token);
+            cleanup = RemoveLocalParts(folder, parts, frozen, report, token);
             File.Delete(Path.Combine(folder, ManifestName));
 
             async Task UploadWhileBuilding()
@@ -206,12 +212,14 @@ internal static class ArchivePackage
                 report(meter);
             }
         }
-        FinishFolder(folder);
+        FinishFolder(folder, cleanup.Note);
+        cleanup.Complete();
     }
 
     public static async Task Resume(string folder, IPackageDestination target, Action<PackageMeter> report,
         CancellationToken token, PackageManifest? confirmed = null)
     {
+        CleanupProgress cleanup;
         using (var jobLock = Lock(folder))
         {
             var manifest = ReadManifest(folder);
@@ -230,10 +238,11 @@ internal static class ArchivePackage
             await target.Prepare(manifest.Destination, manifest.RemoteName, resume: true, message =>
                 report(new(PackageStep.Upload, 0, 0, TotalKnown: false, Phase: TransferState.Retrying, Message: message)), token);
             await Publish(folder, manifest, target, report, token);
-            RemoveLocalParts(folder, manifest.Parts, frozen, report, token);
+            cleanup = RemoveLocalParts(folder, manifest.Parts, frozen, report, token);
             File.Delete(Path.Combine(folder, ManifestName));
         }
-        FinishFolder(folder);
+        FinishFolder(folder, cleanup.Note);
+        cleanup.Complete();
     }
 
     private static (ArchivePart[] Parts, IReadOnlyList<ZipEntryIndex> Entries) WriteZip(string folder, string archiveName,
@@ -358,6 +367,9 @@ internal static class ArchivePackage
     {
         var progress = new CleanupProgress(PackageStep.RemoveOriginals, plan.Entries.Count, report);
         var buffer = new byte[1 << 20];
+        HashSet<string>? scanned = null;
+        bool WasScanned(string path) =>
+            (scanned ??= plan.Entries.Select(entry => entry.Path).ToHashSet(StringComparer.OrdinalIgnoreCase)).Contains(path);
         foreach (var entry in plan.Entries.Reverse())
         {
             token.ThrowIfCancellationRequested();
@@ -370,7 +382,7 @@ internal static class ArchivePackage
                 if (!PackageFiles.GetRegularAttributes(entry.Path).HasFlag(FileAttributes.Directory))
                     throw new IOException($"The original folder changed: {entry.Path}");
                 PackageFiles.EnsureDefaultDataStream(entry.Path);
-                Directory.Delete(entry.Path, recursive: false);
+                DeleteEmptyFolder(entry.Path, progress.Note, token, WasScanned);
             }
             else
             {
@@ -380,6 +392,31 @@ internal static class ArchivePackage
             progress.Processed();
         }
         progress.Complete();
+    }
+
+    private static void DeleteEmptyFolder(string path, Action<string> note, CancellationToken token,
+        Func<string, bool>? wasScanned = null)
+    {
+        int[] delays = [100, 300, 1000];
+        for (int attempt = 0; ; attempt++)
+        {
+            token.ThrowIfCancellationRequested();
+            try
+            {
+                Directory.Delete(path, recursive: false);
+                return;
+            }
+            catch (IOException error) when (LocalFiles.IsDirectoryNotEmpty(error) || (error.HResult & 0xFFFF) == 32)
+            {
+                if (LocalFiles.IsDirectoryNotEmpty(error) && (attempt == 0 || attempt == delays.Length))
+                    note(LocalFiles.DescribeNonEmptyDirectory(path, wasScanned));
+                if (attempt == delays.Length)
+                    throw;
+                note($"Retrying removal of {path} in {delays[attempt]} ms after Windows error {error.HResult & 0xFFFF}. {error.Message}");
+                // A Windows or SMB handle can delay the removal of an already deleted child.
+                token.WaitHandle.WaitOne(delays[attempt]);
+            }
+        }
     }
 
     private static async Task Publish(string folder, PackageManifest manifest, IPackageDestination target,
@@ -451,7 +488,7 @@ internal static class ArchivePackage
             report(new(PackageStep.RemoteSha, done, total, Phase: TransferState.Retrying, Message: message));
     }
 
-    private static void RemoveLocalParts(string folder, ArchivePart[] parts, VerifiedFiles frozen,
+    private static CleanupProgress RemoveLocalParts(string folder, ArchivePart[] parts, VerifiedFiles frozen,
         Action<PackageMeter> report, CancellationToken token)
     {
         var progress = new CleanupProgress(PackageStep.RemoveParts, parts.Length, report);
@@ -466,7 +503,7 @@ internal static class ArchivePackage
                     part.Sha256, buffer, verified, token);
             progress.Processed();
         }
-        progress.Complete();
+        return progress;
     }
 
     private sealed class CleanupProgress
@@ -496,16 +533,20 @@ internal static class ArchivePackage
         }
 
         public void Complete() => report(new(step, total, total, CountItems: true, Finished: true));
+
+        public void Note(string message) => report(new(step, done, total, CountItems: true, Message: message));
     }
 
     private static FileStream Lock(string folder) =>
         new(Path.Combine(folder, ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
 
-    private static void FinishFolder(string folder)
+    private static void FinishFolder(string folder, Action<string> note)
     {
         File.Delete(Path.Combine(folder, ".lock"));
         if (!Directory.EnumerateFileSystemEntries(folder).Any())
-            Directory.Delete(folder);
+            DeleteEmptyFolder(folder, note, CancellationToken.None);
+        else
+            note(LocalFiles.DescribeNonEmptyDirectory(folder));
     }
 
     private static void SaveManifest(string folder, PackageManifest manifest)
@@ -534,6 +575,8 @@ internal static class ArchivePackage
             volumeCount -= sidecars.Length;
             if (volumeCount < 1)
                 throw new IOException("The recovery manifest is missing archive volumes or contents files.");
+            if (manifest.Parts[volumeCount].Name == "contents.txt")
+                sidecars = sidecars.Select(filename => filename[PackageContents.Prefix.Length..]).ToArray();
         }
         for (int i = 0; i < manifest.Parts.Length; i++)
         {

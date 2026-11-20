@@ -18,7 +18,7 @@ internal static class PackageDialog
             "The app uploads missing package files to the same SURF folder. It checks the SHA-256 of every file on SURF, including files already uploaded.");
         Section(6, "3. Clean up the recovery folder",
             "The app removes local package files only after all checks pass. It leaves the original source files alone. If a check fails, the recovery files remain available for another attempt.");
-        Body(8, "For files already on tape, use Restore from tape. Double-click an HTML or TXT file to preview it, or retention.json to edit it.",
+        Body(8, $"For files already on tape, use Restore from tape. Double-click an HTML or TXT file to preview it, or {RetentionMetadata.FileName} to edit it.",
             DarkTheme.Muted);
 
         var next = DarkTheme.Button("Choose recovery folder…", ActionIcon.Browse, primary: true);
@@ -86,14 +86,14 @@ internal static class PackageDialog
     public static PackageOptions? Confirm(Form owner, IReadOnlyList<ArchiveSelection> requests)
     {
         using var dialog = CreateDialog("Archive to SURF Data Archive", new Size(764, 735));
-        var layout = Layout([31, 70, 28, 38, 24, 29, 35, 46, -1, 29, 150, 42, 40]);
+        var layout = Layout([31, 90, 28, 38, 24, 29, 35, 46, -1, 29, 150, 42, 40]);
         dialog.Controls.Add(layout);
         layout.Controls.Add(DarkTheme.Label("Add selected archives to the queue?", DarkTheme.Heading), 0, 0);
         var explanation = DarkTheme.Label(
             "When the job starts, the app scans the current contents of the selected folders and checks staging space. " +
             "It creates a ZIP in numbered parts of up to 200 MB and uploads parts as they finish. " +
-            "The archive includes contents files and retention.json. Open the .zip.001 file in 7-Zip to extract it. " +
-            "Windows permissions are outside the ZIP archive.");
+            "The archive includes contents and retention files. For each folder archive the app saves local copies in a sibling folder with the __sda_ prefix. " +
+            "Open the .zip.001 file in 7-Zip to extract it. Windows permissions are outside the ZIP archive.");
         explanation.AutoSize = false;
         explanation.Dock = DockStyle.Fill;
         layout.Controls.Add(explanation, 0, 1);
@@ -262,7 +262,7 @@ internal static class PackageDialog
             DarkTheme.Small, DarkTheme.Muted), 0, 2);
         var fields = new RetentionInput(original);
         layout.Controls.Add(fields, 0, 3);
-        var feedback = StatusLabel("Save updates retention.json on SURF.");
+        var feedback = StatusLabel($"Save updates {RetentionMetadata.FileName} on SURF.");
         layout.Controls.Add(feedback, 0, 4);
         var confirm = DarkTheme.Button("Save to SURF", ActionIcon.Save, primary: true);
         var cancel = Cancel();

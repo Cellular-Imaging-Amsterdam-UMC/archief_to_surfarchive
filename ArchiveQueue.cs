@@ -38,6 +38,9 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
         && State is ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled;
 
     [JsonIgnore]
+    public string? LocalReferencePath => DirectUpload ? null : PackageContents.LocalReferencePath(Source, Selection);
+
+    [JsonIgnore]
     public int Steps => DirectUpload ? 1 : ArchiveQueue.ArchiveSteps;
 
     public static ArchiveQueueItem FromSelection(ArchiveSelection selection, PackageOptions options) =>
@@ -48,6 +51,14 @@ internal sealed record ArchiveQueueItem(string LocalName, string Name, string So
 
     public ArchiveRequest Prepare(CancellationToken token, ArchiveScanProgress? progress = null)
     {
+        token.ThrowIfCancellationRequested();
+        if (LocalReferencePath is { } reference)
+        {
+            if (Path.GetFileName(reference).Length > 255)
+                throw new IOException("The local folder name is too long for the __sda_ prefix. Shorten it and queue it again.");
+            if (Path.Exists(reference))
+                throw new IOException($"The local archive reference already exists at {reference}. Choose another source folder or move the existing reference.");
+        }
         var plan = PackagePlan.Create(Source, Selection, token, progress, Options!.LocalStagingFolder,
             checkSelectedFiles: SourceHash is null);
         if (SourceHash is { } hash)

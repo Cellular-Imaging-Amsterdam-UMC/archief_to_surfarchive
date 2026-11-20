@@ -13,9 +13,11 @@ internal sealed class LoginDialog : Form
     private ArchiveSession? session;
     private bool connecting;
     private string? settingsError;
+    private readonly SessionLog? log;
 
-    public LoginDialog()
+    public LoginDialog(SessionLog? log = null)
     {
+        this.log = log;
         DarkTheme.Window(this);
         Text = "Sign in · SURF Data Archive";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -61,7 +63,11 @@ internal sealed class LoginDialog : Form
             username.Text = LoginSettings.ReadUsername();
             remember.Checked = username.Text.Length > 0;
         }
-        catch (Exception error) { settingsError = "Could not update local login settings: " + error.Message; }
+        catch (Exception error)
+        {
+            settingsError = "Could not update local login settings: " + error.Message;
+            log?.Write(settingsError);
+        }
 
         AcceptButton = signIn;
         CancelButton = cancel;
@@ -93,23 +99,28 @@ internal sealed class LoginDialog : Form
         connecting = true;
         username.Enabled = password.Enabled = remember.Enabled = signIn.Enabled = cancel.Enabled = false;
         ShowFeedback("Connecting to archive.surf.nl…", DarkTheme.Mint);
+        log?.Write($"Connecting to {ArchiveSession.Host}.");
         try
         {
             var credentials = new Credentials(name, password.Text);
             session = await Task.Run(() => new ArchiveSession(credentials));
+            log?.Write($"Signed in to {ArchiveSession.Host}. Archive root {session.Root}.");
             try { LoginSettings.RememberUsername(remember.Checked ? name : null); }
             catch (Exception error)
             {
+                log?.Write($"Could not update the saved username. {error.Message}");
                 MessageBox.Show(this, "Could not update the saved username.\n\n" + error.Message,
                     Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
         catch (SshAuthenticationException)
         {
+            log?.Write("SURF authentication failed.");
             ShowFeedback("Sign-in failed. Check your username and password.", DarkTheme.Error);
         }
         catch (Exception error)
         {
+            log?.Write($"SURF sign-in failed. {error.GetType().Name}. {error.Message}");
             ShowFeedback(error.Message, DarkTheme.Error);
         }
         finally
