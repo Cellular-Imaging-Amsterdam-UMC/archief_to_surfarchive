@@ -29,14 +29,11 @@ internal sealed class RetentionInput : TableLayoutPanel
         maximumYears = initial.ArchivedOn is { } day ? Math.Min(9999 - day.Year, RetentionMetadata.MaximumYears)
             : RetentionMetadata.MaximumYears;
         years.Text = initial.Fields.Years.ToString(CultureInfo.InvariantCulture);
-        years.Width = 75;
-        years.Anchor = AnchorStyles.Left;
         var date = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
         date.Anchor = AnchorStyles.Left;
         years.TextChanged += (_, _) => UpdateDate();
         UpdateDate();
         AddField("Minimum years to keep", years, 0, 0);
-        years.Dock = DockStyle.None;
         years.MaxLength = 3;
         AddField("Keep until", date, 2, 0);
         AddField("Project (optional)", project, 0, 1, span: 3);
