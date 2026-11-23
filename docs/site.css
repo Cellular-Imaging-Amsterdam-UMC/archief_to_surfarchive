@@ -120,8 +120,9 @@ nav a[aria-current="page"] { color: var(--mint); }
 .walkthrough code { overflow-wrap: anywhere; }
 .walkthrough kbd { border: 1px solid var(--rule); border-radius: .25rem; color: var(--ink); padding: .025rem .26rem; }
 .guide-shot { margin-top: 1.35rem; }
-.guide-shot a { display: block; width: fit-content; max-width: 100%; }
+.guide-shot a { display: block; width: fit-content; max-width: 100%; text-decoration: none; }
 .guide-shot img { display: block; max-width: 100%; height: auto; border: 1px solid var(--rule); border-radius: .5rem; }
+.full-size-link { display: inline-block; margin-top: .5rem; font-size: .83rem; font-weight: 650; text-decoration: underline; text-underline-offset: .23em; }
 .guide-shot figcaption { text-align: left; font-size: .85rem; margin-top: .55rem; }
 .dialog-shot { max-width: 52rem; }
 .metadata-list { display: grid; margin-top: 1.15rem; gap: .75rem; }

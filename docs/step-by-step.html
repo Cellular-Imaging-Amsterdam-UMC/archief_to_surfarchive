@@ -43,8 +43,8 @@
         <li><strong>Open the destination on the right.</strong> Browse to a writable folder in <strong>SURF Data Archive</strong>. Use <strong>New folder</strong> if you need a new destination parent. The path above the right pane shows where your selection will go.</li>
       </ol>
       <figure class="guide-shot">
-        <a href="screenshots/workspace.jpg"><img src="screenshots/workspace.jpg" width="1381" height="814" alt="Application workspace with Cell images and Slides selected on the Local / NAS side and a Microscopy destination open on SURF."></a>
-        <figcaption>Choose the source on the left and open the destination parent on the right. Click a screenshot to see it at full size.</figcaption>
+        <a href="screenshots/workspace.png"><img src="screenshots/workspace.png" width="2072" height="1221" alt="Application workspace with Cell images and Slides selected on the Local / NAS side and a Microscopy destination open on SURF."><span class="full-size-link">View full size <span aria-hidden="true">↗</span></span></a>
+        <figcaption>Choose the source on the left and open the destination parent on the right. Use “View full size” to open any screenshot.</figcaption>
       </figure>
     </section>
 
@@ -58,7 +58,7 @@
         <li><strong>Set retention and queue the archive.</strong> Review <strong>Minimum years to keep</strong>, which defaults to 10, and the calculated <strong>Keep until</strong> date. Add the project, contact name, email, and notes as needed. The form applies these values to all archives in the selection. Click the queue button and follow the job in <a href="#activity">Queue and Activity</a>.</li>
       </ol>
       <figure class="guide-shot dialog-shot">
-        <a href="screenshots/archive-confirmation.jpg"><img src="screenshots/archive-confirmation.jpg" width="767" height="766" loading="lazy" alt="Archive confirmation showing the removal checkbox, temporary staging controls, two SURF destinations, and the retention form."></a>
+        <a href="screenshots/archive-confirmation.png"><img src="screenshots/archive-confirmation.png" width="1150" height="1149" loading="lazy" alt="Archive confirmation showing the removal checkbox, temporary staging controls, two SURF destinations, and the retention form."><span class="full-size-link">View full size <span aria-hidden="true">↗</span></span></a>
         <figcaption>The archive confirmation shows the source and destination for each job and the options the jobs will use.</figcaption>
       </figure>
     </section>
@@ -72,7 +72,7 @@
         <li><strong>Find the result on SURF.</strong> Open the new subfolder to find the numbered ZIP parts and the three <code>__sda_</code> files. The contents files record the original location and the full path of each selected file. Loose-file archives keep their metadata on SURF.</li>
       </ol>
       <figure class="guide-shot dialog-shot">
-        <a href="screenshots/name-surf-folder.jpg"><img src="screenshots/name-surf-folder.jpg" width="513" height="213" loading="lazy" alt="Name the SURF folder dialog with October exports entered and a Continue button."></a>
+        <a href="screenshots/name-surf-folder.png"><img src="screenshots/name-surf-folder.png" width="769" height="319" loading="lazy" alt="Name the SURF folder dialog with October exports entered and a Continue button."><span class="full-size-link">View full size <span aria-hidden="true">↗</span></span></a>
         <figcaption>Use a descriptive name for the SURF subfolder that will contain the archive.</figcaption>
       </figure>
     </section>
@@ -86,7 +86,7 @@
         <li><strong>Check the result.</strong> Look for <strong>Finished</strong> in Queue and confirm the original filenames in the SURF pane. Direct upload checks the remote file size. It leaves the source files in place and skips compression, package SHA-256 verification and <code>__sda_</code> metadata.</li>
       </ol>
       <figure class="guide-shot dialog-shot">
-        <a href="screenshots/direct-upload.jpg"><img src="screenshots/direct-upload.jpg" width="411" height="211" loading="lazy" alt="Direct upload confirmation warning that archiving is recommended and showing the number of files and SURF destination."></a>
+        <a href="screenshots/direct-upload.png"><img src="screenshots/direct-upload.png" width="616" height="317" loading="lazy" alt="Direct upload confirmation warning that archiving is recommended and showing the number of files and SURF destination."><span class="full-size-link">View full size <span aria-hidden="true">↗</span></span></a>
         <figcaption>The warning shows the selected file count and the exact SURF folder for the direct upload.</figcaption>
       </figure>
     </section>
@@ -108,7 +108,7 @@
       <h2 id="metadata-heading">Understand the <code>__sda_</code> files</h2>
       <p>Archive to SURF saves three companion files beside the ZIP parts. The shared prefix makes the files easy to find when the folder is sorted by name.</p>
       <figure class="guide-shot">
-        <a href="screenshots/archive-result.jpg"><img src="screenshots/archive-result.jpg" width="1381" height="814" loading="lazy" alt="A local __sda_Cell images reference folder next to the finished SURF archive, which contains three metadata files and two ZIP parts on tape."></a>
+        <a href="screenshots/archive-result.png"><img src="screenshots/archive-result.png" width="2072" height="1221" loading="lazy" alt="A local __sda_Cell images reference folder next to the finished SURF archive, which contains three metadata files and two ZIP parts on tape."><span class="full-size-link">View full size <span aria-hidden="true">↗</span></span></a>
         <figcaption>The Local / NAS reference remains on the left. The archive on SURF contains the metadata and all ZIP parts.</figcaption>
       </figure>
       <dl class="metadata-list">
@@ -126,7 +126,7 @@
         </div>
       </dl>
       <figure class="guide-shot">
-        <a href="screenshots/contents.png"><img src="screenshots/contents.png" width="1040" height="850" loading="lazy" alt="Generated archive contents in a browser with the SURF destination, original source location and extraction instructions."></a>
+        <a href="screenshots/contents.png?v=2"><img src="screenshots/contents.png?v=2" width="2080" height="2660" loading="lazy" alt="Generated archive contents in a browser with the SURF destination, original source location and extraction instructions."><span class="full-size-link">View full size <span aria-hidden="true">↗</span></span></a>
         <figcaption>The HTML contents page records where the data originally came from, even after the source is removed.</figcaption>
       </figure>
       <h3 id="local-reference">The Local / NAS reference folder</h3>
@@ -134,7 +134,7 @@
       <h3>Update retention on SURF</h3>
       <p>In the SURF pane, double-click <code>__sda_retention.json</code>. If it is on tape, the app requests a restore and waits for it to become available. Change the fields in <strong>Edit archive retention</strong> and click <strong>Save to SURF</strong>. Reopen <code>__sda_contents.html</code> from SURF to see the saved values. The app also retrieves the HTML or TXT from tape when you double-click it.</p>
       <figure class="guide-shot dialog-shot">
-        <a href="screenshots/retention.jpg"><img src="screenshots/retention.jpg" width="693" height="425" loading="lazy" alt="Edit archive retention dialog with the archive date, 10 years, the Keep until date, project, contact and notes."></a>
+        <a href="screenshots/retention.png"><img src="screenshots/retention.png" width="1039" height="638" loading="lazy" alt="Edit archive retention dialog with the archive date, the Keep until date, project, contact and notes."><span class="full-size-link">View full size <span aria-hidden="true">↗</span></span></a>
         <figcaption>Save changes to the retention record in the SURF archive folder.</figcaption>
       </figure>
     </section>
