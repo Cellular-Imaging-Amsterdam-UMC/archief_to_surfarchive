@@ -183,6 +183,17 @@ internal static class PackageFiles
         return Path.Combine(parent, FallbackFolderName);
     }
 
+    internal static void CreateDirectoryExclusive(string path)
+    {
+        if (CreateDirectoryW(LongPath(path), IntPtr.Zero))
+            return;
+        int error = Marshal.GetLastWin32Error();
+        if (error is 80 or 183)
+            throw new IOException($"The local archive reference already exists at {path}.");
+        throw new IOException($"Could not create the local archive reference at {path}. {new Win32Exception(error).Message}",
+            unchecked((int)0x80070000) | error);
+    }
+
     internal static string ResolvePath(string path)
     {
         // An upload or download can reserve a path before it exists. Resolve its nearest existing parent.
@@ -380,6 +391,8 @@ internal static class PackageFiles
     private static extern bool FindClose(IntPtr handle);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern bool GetDiskFreeSpaceExW(string directory, out ulong available, out ulong total, out ulong free);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern bool CreateDirectoryW(string path, IntPtr security);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security,
         uint mode, uint flags, IntPtr template);

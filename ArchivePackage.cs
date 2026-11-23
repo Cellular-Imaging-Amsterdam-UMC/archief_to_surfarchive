@@ -148,7 +148,7 @@ internal static class ArchivePackage
                 // Keep the originals until all remote parts and metadata files match.
                 await VerifyRemote(parts, target, ReportStage, token);
                 if (localReference is not null)
-                    PackageContents.WriteLocalReference(localReference, name, contents, frozen.Get, report, token);
+                    PackageContents.WriteLocalReference(localReference, contents, frozen.Get, report, token);
                 else
                     report(new(PackageStep.LocalReference, 0, 0, CountItems: true, Finished: true, Skipped: true));
                 if (originals is not null)
@@ -217,7 +217,7 @@ internal static class ArchivePackage
     }
 
     public static async Task Resume(string folder, IPackageDestination target, Action<PackageMeter> report,
-        CancellationToken token, PackageManifest? confirmed = null)
+        CancellationToken token, PackageManifest? confirmed = null, string? localReference = null)
     {
         CleanupProgress cleanup;
         using (var jobLock = Lock(folder))
@@ -238,6 +238,18 @@ internal static class ArchivePackage
             await target.Prepare(manifest.Destination, manifest.RemoteName, resume: true, message =>
                 report(new(PackageStep.Upload, 0, 0, TotalKnown: false, Phase: TransferState.Retrying, Message: message)), token);
             await Publish(folder, manifest, target, report, token);
+            if (localReference is not null)
+            {
+                var contents = PackageContents.ReferenceParts(manifest);
+                if (contents.Length != 3)
+                    throw new IOException("The recovery manifest does not contain the three archive reference files.");
+                PackageContents.WriteLocalReference(localReference, contents, partName =>
+                {
+                    if (!available.Any(part => part.Name == partName))
+                        throw new IOException($"The local recovery package is missing {partName}, which is needed to rebuild the reference folder.");
+                    return frozen.Get(partName);
+                }, report, token, verifyExisting: true);
+            }
             cleanup = RemoveLocalParts(folder, manifest.Parts, frozen, report, token);
             File.Delete(Path.Combine(folder, ManifestName));
         }

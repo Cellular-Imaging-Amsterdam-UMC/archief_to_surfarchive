@@ -1243,22 +1243,24 @@ internal sealed class MainWindow : Form
                 throw new IOException("The local recovery package does not match this queue item.");
             var item = selected ?? archiveQueue.Items.FirstOrDefault(job => job.LocalName == manifest.Name &&
                 job.RemotePath == remote && job.State is ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled);
+            string? reference = PackageContents.ReferenceParts(manifest).Length == 3 ? item?.LocalReferencePath : null;
+            string referenceNote = reference is null ? "" : $"\n\nThe app also writes or verifies the local reference folder at {reference}.";
 
             if (MessageBox.Show(this,
-                $"Local recovery package:\n{folder}\n\nSURF destination:\n{remote}\n\nThe app uploads missing parts and checks every SURF checksum. It then removes the local package parts. Your original files stay in place.",
+                $"Local recovery package:\n{folder}\n\nSURF destination:\n{remote}\n\nThe app uploads missing parts and checks every SURF checksum. It then removes the local package parts. Your original files stay in place.{referenceNote}",
                 "Resume archive upload", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
                 MessageBoxDefaultButton.Button2) != DialogResult.OK)
                 return;
 
             token.ThrowIfCancellationRequested();
             if (item is not null)
-                archiveQueue.StartRecovery(item, folder);
+                archiveQueue.StartRecovery(item, folder, restoreReference: reference is not null);
             packageSurfPath = remote;
             UpdateControls();
             try
             {
                 await RunPackage(manifest.RemoteName, folder, remote, (target, progress) =>
-                    ArchivePackage.Resume(folder, target, progress, token, manifest), token, item?.LocalName);
+                    ArchivePackage.Resume(folder, target, progress, token, manifest, reference), token, item?.LocalName);
             }
             catch (Exception error)
             {
@@ -1274,6 +1276,9 @@ internal sealed class MainWindow : Form
             finally { packageSurfPath = null; }
             if (item is not null)
                 ChangeQueue(() => archiveQueue.Finish(item.LocalName, ArchiveQueueState.Finished));
+            if (!closeWhenIdle && localBrowsing == 0 && reference is not null && Path.GetDirectoryName(reference) is { } parent &&
+                windows.PathShown.Equals(parent, StringComparison.OrdinalIgnoreCase))
+                await Browse(local: true, () => NavigateLocal(parent, null));
             if (!closeWhenIdle && !editingSurf && surfBrowsing == 0 && surf.PathShown == manifest.Destination)
                 await NavigateRemote(manifest.Destination, null);
             SetFeedback("Archive upload verified. Remaining local archive parts removed.");
@@ -1468,11 +1473,7 @@ internal sealed class MainWindow : Form
                 continue;
             paths.AddRange(job.Selection.Select(item => Path.Combine(job.Source, item.Name)));
             if (job.LocalReferencePath is { } reference)
-            {
                 paths.Add(reference);
-                if (job.State == ArchiveQueueState.Running)
-                    paths.Add(PackageContents.LocalReferenceStagingPath(reference, job.LocalName));
-            }
             if (job.State != ArchiveQueueState.Running || job.DirectUpload)
                 continue;
             if (job.RecoveryPath is { } staging)

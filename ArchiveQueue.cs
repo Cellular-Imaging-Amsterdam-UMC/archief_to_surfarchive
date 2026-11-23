@@ -151,7 +151,7 @@ internal sealed class ArchiveQueue : IDisposable
 
     public void SetRecoveryPath(ArchiveQueueItem item, string path) => Replace(item, item with { RecoveryPath = path });
 
-    public void StartRecovery(ArchiveQueueItem item, string folder)
+    public void StartRecovery(ArchiveQueueItem item, string folder, bool restoreReference = false)
     {
         if (!items.Contains(item) || item.DirectUpload
             || item.State is not (ArchiveQueueState.Interrupted or ArchiveQueueState.Failed or ArchiveQueueState.Cancelled)
@@ -161,7 +161,8 @@ internal sealed class ArchiveQueue : IDisposable
         Replace(item, item with
         {
             State = ArchiveQueueState.Running, RecoveryPath = folder, Detail = null,
-            Progress = ArchiveQueueProgress.Start(RecoverySteps, item.Progress?.CurrentElapsed ?? TimeSpan.Zero)
+            Progress = ArchiveQueueProgress.Start(RecoverySteps + (restoreReference ? 1 : 0),
+                item.Progress?.CurrentElapsed ?? TimeSpan.Zero)
         });
     }
 

@@ -14,51 +14,109 @@ internal static class PackageContents
     public static string? LocalReferencePath(string source, IReadOnlyList<ArchiveEntry> selected) =>
         selected is [{ IsDirectory: true } folder] ? Path.Combine(source, Prefix + folder.Name) : null;
 
-    public static string LocalReferenceStagingPath(string reference, string jobId) =>
-        Path.Combine(Path.GetDirectoryName(reference)!, $".{jobId}-metadata");
+    public static ArchivePart[] ReferenceParts(PackageManifest manifest) =>
+        manifest.Parts.Where(part => part.Name is TextName or HtmlName or RetentionMetadata.FileName).ToArray();
 
-    public static void WriteLocalReference(string reference, string jobId, ArchivePart[] contents,
-        Func<string, SafeFileHandle> openVerified, Action<PackageMeter> report, CancellationToken token)
+    public static void WriteLocalReference(string reference, ArchivePart[] contents,
+        Func<string, SafeFileHandle> openVerified, Action<PackageMeter> report, CancellationToken token,
+        bool verifyExisting = false)
     {
         report(new(PackageStep.LocalReference, 0, contents.Length, CountItems: true));
-        string staging = LocalReferenceStagingPath(reference, jobId);
-        if (Path.Exists(reference) || Path.Exists(staging))
-            throw new IOException($"The local archive reference already exists at {reference} or {staging}.");
-        Directory.CreateDirectory(staging);
-        var written = new List<string>(contents.Length);
-        bool published = false;
+        var delays = new[] { 200, 600, 1500 };
+        int done = 0;
+        if (verifyExisting && Directory.Exists(reference))
+        {
+            TryLocal("verify the existing local reference", reference, () =>
+            {
+                PackageFiles.GetRegularAttributes(reference);
+                foreach (var part in contents)
+                {
+                    string path = Path.Combine(reference, part.Name);
+                    PackageFiles.GetRegularAttributes(path);
+                    using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    using var input = new HashingFileStream(handle, null, token);
+                    input.CopyTo(Stream.Null);
+                    CheckMetadata(input, part);
+                }
+                return true;
+            });
+            report(new(PackageStep.LocalReference, contents.Length, contents.Length, CountItems: true,
+                Finished: true, Message: $"Existing local archive reference verified at {reference}."));
+            return;
+        }
+
+        TryLocal("create the local reference folder", reference, () =>
+        {
+            PackageFiles.CreateDirectoryExclusive(reference);
+            return true;
+        });
+        var written = new List<(string Path, FileStream Output)>(contents.Length);
         try
         {
             foreach (var part in contents)
             {
                 token.ThrowIfCancellationRequested();
-                string path = Path.Combine(staging, part.Name);
+                string path = Path.Combine(reference, part.Name);
                 using var input = new HashingFileStream(openVerified(part.Name), null, token);
-                using (var copy = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                {
-                    written.Add(path);
-                    input.CopyTo(copy);
-                    if (input.ReadBytes != part.Size || !input.Finish().Equals(part.Sha256, StringComparison.OrdinalIgnoreCase))
-                        throw new IOException($"The verified metadata changed while making the local copy of {part.Name}.");
-                    copy.Flush(flushToDisk: true);
-                }
-                report(new(PackageStep.LocalReference, written.Count, contents.Length, CountItems: true));
+                var output = TryLocal("create the metadata file", path,
+                    () => new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None));
+                written.Add((path, output));
+                input.CopyTo(output);
+                CheckMetadata(input, part);
+                output.Flush(flushToDisk: true);
+                report(new(PackageStep.LocalReference, ++done, contents.Length, CountItems: true));
             }
             token.ThrowIfCancellationRequested();
-            Directory.Move(staging, reference);
-            published = true;
-            report(new(PackageStep.LocalReference, contents.Length, contents.Length, CountItems: true,
-                Finished: true, Message: $"Local archive reference saved to {reference}."));
+            foreach (var (_, output) in written)
+                output.Dispose();
         }
-        finally
+        catch
         {
-            if (!published)
+            foreach (var (path, output) in written)
             {
-                foreach (string path in written)
-                    try { File.Delete(path); } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
-                try { Directory.Delete(staging, recursive: false); }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+                CleanUp(output.Dispose, path);
+                CleanUp(() => File.Delete(path), path);
             }
+            CleanUp(() => Directory.Delete(reference, recursive: false), reference);
+            throw;
+        }
+        report(new(PackageStep.LocalReference, contents.Length, contents.Length, CountItems: true,
+            Finished: true, Message: $"Local archive reference copied directly to {reference}."));
+
+        T TryLocal<T>(string operation, string path, Func<T> run)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                token.ThrowIfCancellationRequested();
+                try { return run(); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    int code = error.HResult & 0xFFFF;
+                    string message = $"Could not {operation} at {path}. {error.Message}";
+                    if (attempt >= delays.Length || code is not (5 or 32 or 33))
+                        throw new IOException(message, error);
+                    int delay = delays[attempt];
+                    report(new(PackageStep.LocalReference, done, contents.Length, CountItems: true,
+                        Phase: TransferState.Retrying, Message: $"{message} Retrying in {delay} ms."));
+                    token.WaitHandle.WaitOne(delay);
+                }
+            }
+        }
+
+        void CleanUp(Action remove, string path)
+        {
+            try { remove(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                report(new(PackageStep.LocalReference, done, contents.Length, CountItems: true,
+                    Message: $"Could not clean up the incomplete reference entry {path}. {error.Message}"));
+            }
+        }
+
+        static void CheckMetadata(HashingFileStream input, ArchivePart part)
+        {
+            if (input.ReadBytes != part.Size || !input.Finish().Equals(part.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new IOException($"The local copy of {part.Name} does not match the verified metadata.");
         }
     }
 
