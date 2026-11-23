@@ -120,8 +120,8 @@ internal static class DarkTheme
             styled.SetIcon(icon);
     }
 
-    public static Image? MenuIcon(Button button, int size) =>
-        button is DarkButton styled ? ActionIcons.Get(styled.Icon, Ink, size) : button.Image;
+    public static Image? MenuIcon(Button button, int size, bool enabled) =>
+        button is DarkButton styled ? ActionIcons.Get(styled.Icon, enabled ? Ink : Muted, size) : button.Image;
 
     public static FlowLayoutPanel Row(params Control[] controls)
     {

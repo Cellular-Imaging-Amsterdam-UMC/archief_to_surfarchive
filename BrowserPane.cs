@@ -275,7 +275,7 @@ internal sealed class BrowserPane : UserControl
             var action = actions[i];
             var item = selectionMenu.Items[i];
             item.Enabled = action.CanExecute(selection);
-            item.Image = DarkTheme.MenuIcon(action.Button, Pixels(16));
+            item.Image = DarkTheme.MenuIcon(action.Button, Pixels(16), item.Enabled);
         }
     }
 
@@ -285,7 +285,7 @@ internal sealed class BrowserPane : UserControl
     {
         BackColor = DarkTheme.Panel, ForeColor = DarkTheme.Ink, Font = DarkTheme.Small,
         ShowImageMargin = showIcons, ShowItemToolTips = true,
-        Renderer = new ToolStripProfessionalRenderer(new BrowserMenuColors())
+        Renderer = new BrowserMenuRenderer()
     };
 
     private void ShowRecent()
@@ -759,6 +759,24 @@ internal sealed class BrowserPane : UserControl
     private sealed class FolderNode(ArchiveEntry entry) : TreeNode(entry.Name)
     {
         public ArchiveEntry Entry { get; set; } = entry;
+    }
+
+    private sealed class BrowserMenuRenderer() : ToolStripProfessionalRenderer(new BrowserMenuColors())
+    {
+        protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+        {
+            using var background = new SolidBrush(DarkTheme.Panel);
+            e.Graphics.FillRectangle(background, e.AffectedBounds);
+        }
+
+        protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e)
+        {
+            if (e.Item.Enabled)
+                base.OnRenderItemImage(e);
+            else if (e.Image is { } image && !e.ImageRectangle.IsEmpty)
+                // The menu supplies the muted icon directly so it keeps its dark-theme contrast.
+                e.Graphics.DrawImage(image, e.ImageRectangle);
+        }
     }
 
     private sealed class BrowserMenuColors : ProfessionalColorTable
