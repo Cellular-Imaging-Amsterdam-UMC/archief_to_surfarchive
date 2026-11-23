@@ -35,7 +35,8 @@ internal sealed class MainWindow : Form
     private string[] downloadLocalPaths = [];
     private string? packageSurfPath;
     private string? recoveryLocalPath;
-    private ArchiveRequest? pendingSourceRefresh;
+    private readonly Queue<(string Source, IReadOnlyList<ArchiveEntry> Items)> pendingSourceRefreshes = new();
+    private bool refreshingSources;
     private int localListingVersion;
     private int surfListingVersion;
     private int localBrowsing;
@@ -541,7 +542,10 @@ internal sealed class MainWindow : Form
         finally
         {
             if (local)
+            {
                 localBrowsing--;
+                _ = RefreshArchiveSources();
+            }
             else
                 surfBrowsing--;
         }
@@ -1208,7 +1212,10 @@ internal sealed class MainWindow : Form
 
             bool saved = ChangeQueue(() => archiveQueue.Finish(item.LocalName, outcome, detail));
             if (request is not null && (item.LocalReferencePath is not null || item.Options?.RemoveOriginals == true))
-                await RefreshArchiveSource(request);
+            {
+                pendingSourceRefreshes.Enqueue((request.Plan.Source, request.Items));
+                await RefreshArchiveSources();
+            }
             if (saved && outcome == ArchiveQueueState.Finished)
                 await RefreshAfterArchive(item);
         }
@@ -1245,35 +1252,70 @@ internal sealed class MainWindow : Form
         finally { queuePanel.TrackDirectUpload(null); }
     }
 
-    private async Task RefreshArchiveSource(ArchiveRequest request)
+    private async Task RefreshArchiveSources()
     {
-        if (closeWhenIdle || localBrowsing != 0 || !windows.HasFolder)
+        if (refreshingSources)
             return;
-        string source = request.Plan.Source;
-        string visible = windows.PathShown;
-        if (!visible.Equals(source, StringComparison.OrdinalIgnoreCase) &&
-            !request.Items.Any(item => item.IsDirectory && PackageFiles.IsWithin(visible, Path.Combine(source, item.Name))))
-            return;
-        if (operation is not null)
-        {
-            pendingSourceRefresh = request;
-            return;
-        }
-
-        int refresh = localListingVersion + 1;
+        refreshingSources = true;
         try
         {
-            try { await NavigateLocal(visible, null); }
-            catch (DirectoryNotFoundException) when (visible != source && localListingVersion == refresh &&
-                operation is null && !closeWhenIdle)
+            while (!closeWhenIdle && localBrowsing == 0 && operation is null &&
+                pendingSourceRefreshes.TryPeek(out var change))
             {
-                await NavigateLocal(source, null);
+                if (await RefreshArchiveSource(change.Source, change.Items))
+                    pendingSourceRefreshes.Dequeue();
             }
+        }
+        finally { refreshingSources = false; }
+    }
+
+    private async Task<bool> RefreshArchiveSource(string source, IReadOnlyList<ArchiveEntry> items)
+    {
+        if (!windows.HasFolder || !windows.HasKnownFolder(source))
+            return true;
+        string visible = windows.PathShown;
+        var comparison = StringComparison.OrdinalIgnoreCase;
+        int version = localListingVersion;
+        try
+        {
+            var listing = await Task.Run(() => LocalFiles.List(source));
+            if (closeWhenIdle || version != localListingVersion)
+                return false;
+
+            if (visible.Equals(source, comparison))
+            {
+                windows.ShowFolder(visible, null, listing);
+            }
+            else if (items.FirstOrDefault(item => item.IsDirectory &&
+                PackageFiles.IsWithin(visible, Path.Combine(source, item.Name))) is { } selected)
+            {
+                List<ArchiveEntry>? current = null;
+                if (listing.Any(entry => entry.IsDirectory && entry.Name.Equals(selected.Name, comparison)))
+                {
+                    try { current = await Task.Run(() => LocalFiles.List(visible)); }
+                    catch (IOException error) when (error is DirectoryNotFoundException or FileNotFoundException) { }
+                }
+                if (closeWhenIdle || version != localListingVersion)
+                    return false;
+                if (current is null)
+                    windows.ShowFolder(source, null, listing);
+                else
+                {
+                    windows.RefreshKnownChildren(source, listing);
+                    windows.ShowFolder(visible, null, current);
+                }
+            }
+            else
+                windows.RefreshKnownChildren(source, listing);
+            UpdateControls();
         }
         catch (Exception error)
         {
-            transfers.Log($"Could not refresh the local source folder. {error.Message}");
+            if (!closeWhenIdle && version == localListingVersion)
+                transfers.Log($"Could not refresh the local source folder {source}. {error.Message}");
         }
+        // A newer navigation may have read the old directory state. Retry after it settles.
+        return version == localListingVersion;
     }
 
     private async Task RefreshAfterArchive(ArchiveQueueItem item)
@@ -1767,11 +1809,7 @@ internal sealed class MainWindow : Form
                 BeginInvoke(Close);
             return;
         }
-        if (operation is null && pendingSourceRefresh is { } source)
-        {
-            pendingSourceRefresh = null;
-            _ = RefreshArchiveSource(source);
-        }
+        _ = RefreshArchiveSources();
         TryStartNextArchive();
     }
 

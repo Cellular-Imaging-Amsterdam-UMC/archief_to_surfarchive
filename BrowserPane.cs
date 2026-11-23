@@ -484,13 +484,13 @@ internal sealed class BrowserPane : UserControl
         }
     }
 
-    private static TreeNode? Find(TreeNodeCollection nodes, string path)
+    private TreeNode? Find(TreeNodeCollection nodes, string path)
     {
         foreach (TreeNode node in nodes)
         {
             if (node.Tag is not string candidate)
                 continue;
-            if (string.Equals(candidate, path, StringComparison.Ordinal))
+            if (string.Equals(candidate, path, local ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
                 return node;
             if (path.StartsWith(candidate.EndsWith('\\') ? candidate : candidate + "\\", StringComparison.OrdinalIgnoreCase)
                 || path.StartsWith(candidate + "/", StringComparison.Ordinal))
@@ -527,6 +527,20 @@ internal sealed class BrowserPane : UserControl
     }
 
     public void ForgetFolder(string directory, string name) => Find(folders.Nodes, directory)?.Nodes.RemoveByKey(name);
+
+    public void RefreshKnownChildren(string path, List<ArchiveEntry> content)
+    {
+        if (Find(folders.Nodes, path) is not { } node)
+            return;
+        updating = true;
+        folders.BeginUpdate();
+        try { RefreshChildren(node, content); }
+        finally
+        {
+            folders.EndUpdate();
+            updating = false;
+        }
+    }
 
     public void RestoreLocation()
     {

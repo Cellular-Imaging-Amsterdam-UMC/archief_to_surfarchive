@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="An illustrated guide to archiving folders and files, direct uploads, retention metadata, and restoring archives from SURF.">
+  <meta name="theme-color" content="#12171f">
+  <title>Step-by-step guide · SurfDataArchiveTransfer</title>
+  <link rel="icon" href="app.ico">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="./"><img src="app.ico" alt="" width="28" height="28"><span>SurfDataArchiveTransfer</span></a>
+      <nav aria-label="Main navigation">
+        <a href="index.html#quick-start">Quick start</a>
+        <a href="step-by-step.html" aria-current="page">Step-by-step guide</a>
+        <a href="index.html#faq">FAQ</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap walkthrough" id="main">
+    <header class="guide-intro">
+      <h1>Step-by-step guide</h1>
+      <p class="intro">Choose how to send your data to SURF Data Archive, then follow the steps through verification and retrieval. Screenshots use example files and an example SURF account.</p>
+      <nav class="guide-contents" aria-label="On this page">
+        <a href="#folders">Archive folders</a>
+        <a href="#files">Archive loose files</a>
+        <a href="#direct">Upload only</a>
+        <a href="#activity">Queue and Activity</a>
+        <a href="#metadata">The <code>__sda_</code> files</a>
+        <a href="#restore">Restore and extract</a>
+      </nav>
+    </header>
+
+    <section class="guide-section" id="before" aria-labelledby="before-heading">
+      <h2 id="before-heading">Before you start</h2>
+      <ol class="walkthrough-steps">
+        <li><strong>Open the app and sign in.</strong> Use your SURF Data Archive account. <strong>Remember username</strong> saves the username on this PC. Enter your password each time.</li>
+        <li><strong>Find your data on the left.</strong> In <strong>Local / NAS</strong>, choose a drive or NAS location. Use the folder tree or the address field to find the folder that contains your data. Hold <kbd>Ctrl</kbd> to select separate rows or <kbd>Shift</kbd> to select a range in the file list.</li>
+        <li><strong>Open the destination on the right.</strong> Browse to a writable folder in <strong>SURF Data Archive</strong>. Use <strong>New folder</strong> if you need a new destination parent. The path above the right pane shows where your selection will go.</li>
+      </ol>
+      <figure class="guide-shot">
+        <a href="screenshots/workspace.jpg"><img src="screenshots/workspace.jpg" width="1381" height="814" alt="Application workspace with Cell images and Slides selected on the Local / NAS side and a Microscopy destination open on SURF."></a>
+        <figcaption>Choose the source on the left and open the destination parent on the right. Click a screenshot to see it at full size.</figcaption>
+      </figure>
+    </section>
+
+    <section class="guide-section" id="folders" aria-labelledby="folders-heading">
+      <h2 id="folders-heading">Archive one or more folders</h2>
+      <ol class="walkthrough-steps">
+        <li><strong>Select folders only.</strong> Select one or more folder rows and click <strong>Archive to SURF…</strong>. The app adds one queue item per folder. Each SURF destination uses that folder’s original name, including when the folder contains subfolders.</li>
+        <li><strong>Review the confirmation.</strong> In <strong>Add selected archives to the queue?</strong>, check the listed source, selected items, and SURF paths. For example, <code>Cell images</code> becomes a subfolder named <code>Cell images</code> under the open <code>Microscopy</code> destination. If that name already exists on SURF, choose a different SURF parent.</li>
+        <li><strong>Decide whether to remove the originals.</strong> The removal checkbox is on by default. The app permanently removes the original folder and its archived contents after local verification and the SURF SHA-256 checks pass. For a copy or a trial run, clear the checkbox and use <strong>Queue archive and keep originals</strong>. The app saves a <a href="#local-reference">local reference folder</a> in either mode.</li>
+        <li><strong>Choose temporary storage, if needed.</strong> By default, the app stages the ZIP parts beside the source. Select <strong>Use a temporary staging folder on this PC</strong> and click <strong>Browse…</strong> to stage on a local disk. The app remembers that choice. When a job starts, it scans the selection, estimates the space needed, and falls back to staging on L: if the selected location has too little free space.</li>
+        <li><strong>Set retention and queue the archive.</strong> Review <strong>Minimum years to keep</strong>, which defaults to 10, and the calculated <strong>Keep until</strong> date. Add the project, contact name, email, and notes as needed. The form applies these values to all archives in the selection. Click the queue button and follow the job in <a href="#activity">Queue and Activity</a>.</li>
+      </ol>
+      <figure class="guide-shot dialog-shot">
+        <a href="screenshots/archive-confirmation.jpg"><img src="screenshots/archive-confirmation.jpg" width="767" height="766" loading="lazy" alt="Archive confirmation showing the removal checkbox, temporary staging controls, two SURF destinations, and the retention form."></a>
+        <figcaption>The archive confirmation shows the source and destination for each job and the options the jobs will use.</figcaption>
+      </figure>
+    </section>
+
+    <section class="guide-section" id="files" aria-labelledby="files-heading">
+      <h2 id="files-heading">Archive loose files together</h2>
+      <ol class="walkthrough-steps">
+        <li><strong>Select files only.</strong> Choose one or more files from the same Local / NAS folder. Open the desired SURF parent and click <strong>Archive to SURF…</strong>.</li>
+        <li><strong>Name the new SURF folder.</strong> Enter a new name in <strong>Name the folder for these files on SURF</strong> and click <strong>Continue</strong>. For example, <code>October exports</code> creates an <code>October exports</code> subfolder under the open SURF destination. The selected files go into one archive in that subfolder.</li>
+        <li><strong>Review the same archive options.</strong> Check the destination and selected filenames in the confirmation. Set staging, retention and whether to remove the originals, then queue the archive. If removal is enabled, the app removes the selected files after verification. The containing Local / NAS folder and its other contents stay in place.</li>
+        <li><strong>Find the result on SURF.</strong> Open the new subfolder to find the numbered ZIP parts and the three <code>__sda_</code> files. The contents files record the original location and the full path of each selected file. Loose-file archives keep their metadata on SURF.</li>
+      </ol>
+      <figure class="guide-shot dialog-shot">
+        <a href="screenshots/name-surf-folder.jpg"><img src="screenshots/name-surf-folder.jpg" width="513" height="213" loading="lazy" alt="Name the SURF folder dialog with October exports entered and a Continue button."></a>
+        <figcaption>Use a descriptive name for the SURF subfolder that will contain the archive.</figcaption>
+      </figure>
+    </section>
+
+    <section class="guide-section" id="direct" aria-labelledby="direct-heading">
+      <h2 id="direct-heading">Upload files as they are</h2>
+      <p>Use direct upload for files that are already packaged, such as an existing ZIP export. Every selected file must be larger than 100 MB.</p>
+      <ol class="walkthrough-steps">
+        <li><strong>Select the files on the left.</strong> Open the exact folder where the files should appear on SURF. To put them in a new subfolder, create and open that folder first.</li>
+        <li><strong>Click Upload to SURF.</strong> Read the confirmation, check the destination, and choose <strong>OK</strong>. The app adds each file to the queue separately.</li>
+        <li><strong>Check the result.</strong> Look for <strong>Finished</strong> in Queue and confirm the original filenames in the SURF pane. Direct upload checks the remote file size. It leaves the source files in place and skips compression, package SHA-256 verification and <code>__sda_</code> metadata.</li>
+      </ol>
+      <figure class="guide-shot dialog-shot">
+        <a href="screenshots/direct-upload.jpg"><img src="screenshots/direct-upload.jpg" width="411" height="211" loading="lazy" alt="Direct upload confirmation warning that archiving is recommended and showing the number of files and SURF destination."></a>
+        <figcaption>The warning shows the selected file count and the exact SURF folder for the direct upload.</figcaption>
+      </figure>
+    </section>
+
+    <section class="guide-section" id="activity" aria-labelledby="activity-heading">
+      <h2 id="activity-heading">Follow the queue and the individual steps</h2>
+      <p><strong>Queue</strong> shows each job’s destination, overall progress and total time. Add more jobs while the current job runs. Use the icons to pause, resume or remove waiting jobs. Waiting jobs continue after sign-in when you restart the app. Paused jobs stay paused.</p>
+      <p><strong>Activity</strong> shows the progress of each step. During the initial scan, the item count and amount of source data found grow as the app explores the selection. The app can start uploading parts while it compresses the remaining data.</p>
+      <ol class="walkthrough-steps">
+        <li><strong>Scan source and compress source.</strong> The app lists the source, checks staging space and compresses it into numbered ZIP parts of up to 200 MB.</li>
+        <li><strong>Check local archive and write archive metadata.</strong> The app reads the archive back, checks the ZIP part hashes and checks that the extracted file bytes match the source. It writes the contents and retention files.</li>
+        <li><strong>Upload to SURF and check SURF checksums.</strong> The app finishes sending the package and checks every uploaded part and metadata file against its SHA-256.</li>
+        <li><strong>Save the local reference, remove originals and clean up.</strong> Where applicable, the app writes the prefixed reference folder and removes the originals as configured. It then removes temporary local package files. Check Queue for <strong>Finished</strong>.</li>
+      </ol>
+      <p>If a job fails or is interrupted, check <strong>Activity</strong> and <strong>Logs</strong>. When a recovery package remains available locally, use the queue item’s <strong>Resume archive upload</strong> icon. The app reuses existing verified files, finishes the upload and checks the remote hashes. Resuming keeps any remaining originals in place.</p>
+    </section>
+
+    <section class="guide-section" id="metadata" aria-labelledby="metadata-heading">
+      <h2 id="metadata-heading">Understand the <code>__sda_</code> files</h2>
+      <p>Archive to SURF saves three companion files beside the ZIP parts. The shared prefix makes the files easy to find when the folder is sorted by name.</p>
+      <figure class="guide-shot">
+        <a href="screenshots/archive-result.jpg"><img src="screenshots/archive-result.jpg" width="1381" height="814" loading="lazy" alt="A local __sda_Cell images reference folder next to the finished SURF archive, which contains three metadata files and two ZIP parts on tape."></a>
+        <figcaption>The Local / NAS reference remains on the left. The archive on SURF contains the metadata and all ZIP parts.</figcaption>
+      </figure>
+      <dl class="metadata-list">
+        <div>
+          <dt><code>__sda_contents.html</code></dt>
+          <dd>Double-click to open in your default browser. It shows the original Local / NAS location, the SURF destination, an expandable tree, extraction instructions and a short list of ZIP parts. When opened from SURF, the app fetches the current retention JSON from the same folder and displays those values.</dd>
+        </div>
+        <div>
+          <dt><code>__sda_contents.txt</code></dt>
+          <dd>Double-click to open in Notepad. It records the original source paths and SURF destination, the package contents, and the complete list of ZIP parts in extraction order with SHA-256 checksums.</dd>
+        </div>
+        <div>
+          <dt><code>__sda_retention.json</code></dt>
+          <dd>Records the archive date, minimum years, calculated retain-until date, project, contact name, email and notes. It documents the intended retention period for your team. SURF storage settings and deletion schedules are managed separately.</dd>
+        </div>
+      </dl>
+      <figure class="guide-shot">
+        <a href="screenshots/contents.png"><img src="screenshots/contents.png" width="1040" height="850" loading="lazy" alt="Generated archive contents in a browser with the SURF destination, original source location and extraction instructions."></a>
+        <figcaption>The HTML contents page records where the data originally came from, even after the source is removed.</figcaption>
+      </figure>
+      <h3 id="local-reference">The Local / NAS reference folder</h3>
+      <p>For a folder archive, the app saves a sibling such as <code>__sda_Cell images</code> next to the original location. It contains the three companion files. To get the archived data back, retrieve the ZIP parts from the SURF destination listed in the contents. The local copies reflect the metadata from the time of archiving. Open the remote HTML to see the latest retention values.</p>
+      <h3>Update retention on SURF</h3>
+      <p>In the SURF pane, double-click <code>__sda_retention.json</code>. If it is on tape, the app requests a restore and waits for it to become available. Change the fields in <strong>Edit archive retention</strong> and click <strong>Save to SURF</strong>. Reopen <code>__sda_contents.html</code> from SURF to see the saved values. The app also retrieves the HTML or TXT from tape when you double-click it.</p>
+      <figure class="guide-shot dialog-shot">
+        <a href="screenshots/retention.jpg"><img src="screenshots/retention.jpg" width="693" height="425" loading="lazy" alt="Edit archive retention dialog with the archive date, 10 years, the Keep until date, project, contact and notes."></a>
+        <figcaption>Save changes to the retention record in the SURF archive folder.</figcaption>
+      </figure>
+    </section>
+
+    <section class="guide-section" id="restore" aria-labelledby="restore-heading">
+      <h2 id="restore-heading">Restore, download and extract</h2>
+      <ol class="walkthrough-steps">
+        <li><strong>Open the archive folder on SURF.</strong> The <strong>Archive status</strong> column shows whether a part is on disk, on tape, or being restored. Use the contents file to check which parts belong to the archive.</li>
+        <li><strong>Restore files that are on tape.</strong> Select the archive parts or the archive folder and click <strong>Restore from tape</strong>. Leave the app open to monitor the request in Activity until it shows <strong>Ready to download</strong>.</li>
+        <li><strong>Download to a folder with enough space.</strong> Open your download location on the left. Select all the archive parts on the right and click <strong>Download</strong>. A SURF folder can be downloaded as a folder when it has no subfolders. When it contains subfolders, open it and select the files you need.</li>
+        <li><strong>Extract with 7-Zip.</strong> Keep all parts, such as <code>Cell images.zip.001</code>, <code>Cell images.zip.002</code> and the rest, together under their original names. Right-click the <code>.zip.001</code> file and choose <strong>7-Zip → Extract files…</strong>. On Windows 11, use <strong>Show more options</strong> to find the 7-Zip menu if needed. You can also select <code>.zip.001</code> in 7-Zip File Manager and click <strong>Extract</strong>. Choose an output folder. 7-Zip reads the remaining parts automatically.</li>
+        <li><strong>Check the extracted data.</strong> Compare it with the folder tree in <code>__sda_contents.html</code>. The archive stores file contents and paths. Windows access permissions are managed separately on the restore location.</li>
+      </ol>
+      <p><a href="https://www.7-zip.org/">Download 7-Zip from its official site</a></p>
+    </section>
+  </main>
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>Cellular Imaging · Amsterdam UMC</span>
+      <div>
+        <a href="index.html#quick-start">Back to Quick start</a>
+        <a href="https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/1474651/Data+Archive">About SURF Data Archive</a>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

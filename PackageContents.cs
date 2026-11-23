@@ -135,7 +135,7 @@ internal static class PackageContents
             using (var text = new StreamWriter(textFile, new UTF8Encoding(false), leaveOpen: true))
             using (var html = new StreamWriter(htmlFile, new UTF8Encoding(false), leaveOpen: true))
             {
-                WriteHeaders(text, html, name, plan, volumes, remotePath);
+                WriteHeaders(text, html, name, plan, volumes, remotePath, token);
                 WriteRestore(html, volumes);
                 WriteRetention(html, retention);
                 html.WriteLine("""<section class="card" aria-label="Archive tree"><h2>Folder tree</h2><ul class="tree">""");
@@ -206,21 +206,13 @@ internal static class PackageContents
     }
 
     private static void WriteHeaders(StreamWriter text, StreamWriter html, string name, PackagePlan plan, ArchivePart[] volumes,
-        string? remotePath)
+        string? remotePath, CancellationToken token)
     {
         int folders = plan.Entries.Count(entry => entry.IsDirectory);
         int files = plan.Entries.Count - folders;
         text.WriteLine(name);
         if (remotePath is not null)
             text.WriteLine($"SURF Data Archive   {remotePath}");
-        text.WriteLine($"{files} files, {folders} folders, {plan.Bytes} source bytes, {volumes.Length} ZIP parts");
-        text.WriteLine($"Restore: download all parts to one folder and open {volumes[0].Name} in 7-Zip. Select Extract.");
-        text.WriteLine();
-        text.WriteLine("Parts in restore order (SHA-256, filename):");
-        foreach (var part in volumes)
-            text.WriteLine($"{part.Sha256.ToLowerInvariant()}  {part.Name}");
-        text.WriteLine();
-        text.WriteLine("Type\tBytes\tPath");
 
         html.WriteLine("""
             <!doctype html>
@@ -273,6 +265,46 @@ internal static class PackageContents
         if (remotePath is not null)
             html.WriteLine($"<p>SURF Data Archive <code>{Escape(remotePath)}</code></p>");
         html.WriteLine("</header>");
+
+        WriteSourcePaths(text, html, plan, token);
+
+        text.WriteLine($"{files} files, {folders} folders, {plan.Bytes} source bytes, {volumes.Length} ZIP parts");
+        text.WriteLine($"Restore: download all parts to one folder and open {volumes[0].Name} in 7-Zip. Select Extract.");
+        text.WriteLine();
+        text.WriteLine("Parts in restore order (SHA-256, filename):");
+        foreach (var part in volumes)
+            text.WriteLine($"{part.Sha256.ToLowerInvariant()}  {part.Name}");
+        text.WriteLine();
+        text.WriteLine("Type\tBytes\tPath");
+    }
+
+    private static void WriteSourcePaths(StreamWriter text, StreamWriter html, PackagePlan plan, CancellationToken token)
+    {
+        var paths = new List<string>();
+        foreach (var entry in plan.Entries)
+        {
+            token.ThrowIfCancellationRequested();
+            if (entry.Name.AsSpan().TrimEnd('/').IndexOf('/') < 0)
+                paths.Add(entry.Path);
+        }
+
+        string location = paths.Count == 1 ? paths[0] : plan.Source;
+        text.WriteLine($"Original source location   {location}");
+        html.WriteLine($"<section class=\"card\"><h2>Original source location</h2><p><code>{Escape(location)}</code></p>");
+        if (paths.Count > 1)
+        {
+            text.WriteLine("Original paths of selected items:");
+            html.WriteLine($"<details><summary>Selected paths ({paths.Count:N0})</summary><ul>");
+            foreach (string path in paths)
+            {
+                token.ThrowIfCancellationRequested();
+                text.WriteLine($"  {path}");
+                html.WriteLine($"<li><code>{Escape(path)}</code></li>");
+            }
+            html.WriteLine("</ul></details>");
+        }
+        html.WriteLine("</section>");
+        text.WriteLine();
     }
 
     private static void WriteRestore(StreamWriter html, ArchivePart[] volumes)
