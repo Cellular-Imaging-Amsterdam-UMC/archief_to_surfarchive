@@ -11,6 +11,7 @@ internal static class RemovalDialog
             StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false,
             ShowInTaskbar = false
         };
+        dialog.SuspendLayout();
         DarkTheme.Window(dialog);
         var layout = new TableLayoutPanel
         {
@@ -51,13 +52,13 @@ internal static class RemovalDialog
         remove.DialogResult = DialogResult.OK;
         var cancel = DarkTheme.Button("Cancel", ActionIcon.Cancel, primary: true);
         cancel.DialogResult = DialogResult.Cancel;
-        var buttons = DarkTheme.Row(remove, cancel);
+        var buttons = DarkTheme.Toolbar(remove, cancel);
         buttons.Margin = new Padding(0, 7, 0, 0);
         buttons.FlowDirection = FlowDirection.RightToLeft;
         layout.Controls.Add(buttons, 0, 4);
         dialog.Controls.Add(layout);
         dialog.AcceptButton = dialog.CancelButton = cancel;
         dialog.Shown += (_, _) => cancel.Focus();
-        return dialog.ShowDialog(owner) == DialogResult.OK;
+        return DarkTheme.ShowDialog(dialog, owner) == DialogResult.OK;
     }
 }

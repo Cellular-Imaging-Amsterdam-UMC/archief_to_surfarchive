@@ -18,12 +18,12 @@ internal sealed class RetentionInput : TableLayoutPanel
         ColumnCount = 4;
         RowCount = 4;
         Margin = Padding.Empty;
-        ColumnStyles.Add(new(SizeType.Absolute, 153));
+        ColumnStyles.Add(new(SizeType.AutoSize));
         ColumnStyles.Add(new(SizeType.Percent, 50));
-        ColumnStyles.Add(new(SizeType.Absolute, 95));
+        ColumnStyles.Add(new(SizeType.AutoSize));
         ColumnStyles.Add(new(SizeType.Percent, 50));
         for (int i = 0; i < 3; i++)
-            RowStyles.Add(new(SizeType.Absolute, 28));
+            RowStyles.Add(new(SizeType.AutoSize));
         RowStyles.Add(new(SizeType.Percent, 100));
 
         maximumYears = initial.ArchivedOn is { } day ? Math.Min(9999 - day.Year, RetentionMetadata.MaximumYears)

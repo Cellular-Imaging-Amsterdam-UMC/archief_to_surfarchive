@@ -27,7 +27,7 @@ internal static class PackageDialog
         layout.Controls.Add(Actions(next, cancel), 0, 9);
         dialog.AcceptButton = next;
         dialog.CancelButton = cancel;
-        return dialog.ShowDialog(owner) == DialogResult.OK;
+        return DarkTheme.ShowDialog(dialog, owner) == DialogResult.OK;
 
         void Section(int row, string heading, string text)
         {
@@ -80,7 +80,7 @@ internal static class PackageDialog
                 input.Focus();
             }
         };
-        return dialog.ShowDialog(owner) == DialogResult.OK ? name : null;
+        return DarkTheme.ShowDialog(dialog, owner) == DialogResult.OK ? name : null;
     }
 
     public static PackageOptions? Confirm(Form owner, IReadOnlyList<ArchiveSelection> requests)
@@ -195,7 +195,7 @@ internal static class PackageDialog
                 stageLocally.Checked ? stagingPath.Text : null);
             dialog.DialogResult = DialogResult.OK;
         };
-        return dialog.ShowDialog(owner) == DialogResult.OK ? options : null;
+        return DarkTheme.ShowDialog(dialog, owner) == DialogResult.OK ? options : null;
 
         bool RememberStaging()
         {
@@ -305,7 +305,7 @@ internal static class PackageDialog
                 }
             }
         };
-        return dialog.ShowDialog(owner) == DialogResult.OK;
+        return DarkTheme.ShowDialog(dialog, owner) == DialogResult.OK;
     }
 
     private static Label StatusLabel(string text)
@@ -323,6 +323,7 @@ internal static class PackageDialog
             Text = title, ClientSize = size, FormBorderStyle = FormBorderStyle.FixedDialog,
             StartPosition = FormStartPosition.CenterParent, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false
         };
+        dialog.SuspendLayout();
         DarkTheme.Window(dialog);
         return dialog;
     }
@@ -347,7 +348,7 @@ internal static class PackageDialog
 
     private static FlowLayoutPanel Actions(Button confirm, Button cancel)
     {
-        var buttons = DarkTheme.Row(confirm, cancel);
+        var buttons = DarkTheme.Toolbar(confirm, cancel);
         buttons.FlowDirection = FlowDirection.RightToLeft;
         return buttons;
     }

@@ -1,6 +1,19 @@
 namespace SurfArchive;
 
 internal sealed record FolderListing(string Path, List<ArchiveEntry> Entries);
+internal sealed record PaneSelection(string Directory, IReadOnlyList<ArchiveEntry> Items, string? TreeFolder = null)
+{
+    public string Folder => TreeFolder ?? Directory;
+}
+
+internal sealed record PaneAction(Button Button, Func<PaneSelection, bool> CanExecute, Action<PaneSelection> Execute)
+{
+    public void Invoke(PaneSelection selection)
+    {
+        if (CanExecute(selection))
+            Execute(selection);
+    }
+}
 
 internal sealed class BrowserPane : UserControl
 {
@@ -11,7 +24,7 @@ internal sealed class BrowserPane : UserControl
         ShowLines = false, FullRowSelect = true, DrawMode = TreeViewDrawMode.OwnerDrawAll,
         Font = DarkTheme.Small, ItemHeight = 23, Indent = 16, PathSeparator = "/", ShowNodeToolTips = true
     };
-    private readonly ListView files = new()
+    private readonly ContextListView files = new()
     {
         Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false,
         BorderStyle = BorderStyle.None, MultiSelect = true, OwnerDraw = true, ShowItemToolTips = true
@@ -21,12 +34,10 @@ internal sealed class BrowserPane : UserControl
     private readonly Button up = DarkTheme.Button("Up", ActionIcon.Up);
     private readonly Button reload = DarkTheme.Button("Refresh", ActionIcon.Refresh);
     private readonly Button recent = DarkTheme.Button("Recent", ActionIcon.History);
-    private readonly ContextMenuStrip recentMenu = new()
-    {
-        BackColor = DarkTheme.Panel, ForeColor = DarkTheme.Ink, Font = DarkTheme.Small,
-        ShowImageMargin = false, ShowItemToolTips = true,
-        Renderer = new ToolStripProfessionalRenderer(new RecentMenuColors())
-    };
+    private readonly ContextMenuStrip recentMenu = CreateMenu(showIcons: false);
+    private readonly ContextMenuStrip selectionMenu = CreateMenu(showIcons: true);
+    private PaneAction[] actions = [];
+    private PaneSelection? menuSelection;
     private readonly Label count = DarkTheme.Label("", DarkTheme.Small, DarkTheme.Muted);
     private readonly SplitContainer split = new() { Dock = DockStyle.Fill, SplitterWidth = 6 };
     private readonly ComboBox locations = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 151, DrawMode = DrawMode.OwnerDrawFixed };
@@ -137,6 +148,25 @@ internal sealed class BrowserPane : UserControl
                 OpenFile?.Invoke(entry);
         };
         files.ItemSelectionChanged += (_, _) => SelectionChanged?.Invoke();
+        files.ContextClick += point => OpenFileMenu(files.GetItemAt(point.X, point.Y), point);
+        folders.ContextClick += point => OpenTreeMenu(folders.GetNodeAt(point.X, point.Y), point);
+        files.KeyDown += (_, e) =>
+        {
+            if (!IsMenuKey(e))
+                return;
+            e.Handled = e.SuppressKeyPress = true;
+            var item = files.FocusedItem is { Selected: true } focused ? focused
+                : files.SelectedItems.Cast<ListViewItem>().FirstOrDefault();
+            OpenFileMenu(item, item is null ? new Point(8, 8) : new Point(item.Bounds.Left, item.Bounds.Bottom));
+        };
+        folders.KeyDown += (_, e) =>
+        {
+            if (!IsMenuKey(e))
+                return;
+            e.Handled = e.SuppressKeyPress = true;
+            if (folders.SelectedNode is { } node)
+                OpenTreeMenu(node, new Point(node.Bounds.Left, node.Bounds.Bottom));
+        };
         files.ColumnClick += (_, e) =>
         {
             descending = sortColumn == e.Column && !descending;
@@ -166,6 +196,7 @@ internal sealed class BrowserPane : UserControl
     public RecentFolder? LastVisited => history?.Items.FirstOrDefault();
     public IReadOnlyList<ArchiveEntry> SelectedItems => files.SelectedItems.Cast<ListViewItem>()
         .Select(item => (ArchiveEntry)item.Tag!).ToArray();
+    private PaneSelection Selection => new(PathShown, SelectedItems);
     public ArchiveEntry[] SnapshotEntries() => entries.ToArray();
     public bool HasKnownFolder(string path) => Find(folders.Nodes, path) is not null;
 
@@ -177,6 +208,85 @@ internal sealed class BrowserPane : UserControl
     }
 
     public void SetHistory(RecentFolders? value) => history = value;
+
+    public FlowLayoutPanel ActionBar(params PaneAction[] commands)
+    {
+        actions = commands;
+        foreach (var action in actions)
+        {
+            action.Button.Click += (_, _) => action.Invoke(Selection);
+            var menuItem = new ToolStripMenuItem(action.Button.Text);
+            menuItem.Click += (_, _) =>
+            {
+                if (menuSelection is { } selected)
+                    action.Invoke(selected);
+            };
+            selectionMenu.Items.Add(menuItem);
+        }
+        return DarkTheme.Toolbar(actions.Select(action => action.Button).ToArray());
+    }
+
+    public void UpdateActions()
+    {
+        var selection = Selection;
+        foreach (var action in actions)
+            action.Button.Enabled = action.CanExecute(selection);
+        if (selectionMenu.Visible && menuSelection is { } selected)
+            UpdateMenuActions(selected);
+    }
+
+    private void OpenFileMenu(ListViewItem? clicked, Point location)
+    {
+        if (!canNavigate || (clicked is null && local))
+            return;
+        if (clicked is not null && !clicked.Selected)
+        {
+            foreach (ListViewItem previous in files.SelectedItems.Cast<ListViewItem>().ToArray())
+                previous.Selected = false;
+            clicked.Selected = true;
+            clicked.Focused = true;
+        }
+        ShowSelectionMenu(files, location, clicked is null ? new(PathShown, []) : Selection);
+    }
+
+    private void OpenTreeMenu(TreeNode? node, Point location)
+    {
+        if (!canNavigate || node?.Tag is not string path)
+            return;
+        var selection = node is FolderNode folder && node.Parent?.Tag is string parent
+            ? new PaneSelection(parent, [folder.Entry], path) : new PaneSelection(path, [], path);
+        ShowSelectionMenu(folders, location, selection);
+    }
+
+    private void ShowSelectionMenu(Control anchor, Point location, PaneSelection selection)
+    {
+        if (actions.Length == 0)
+            return;
+        menuSelection = selection;
+        UpdateMenuActions(selection);
+        if (selection.Items.Count > 0 || selectionMenu.Items.Cast<ToolStripItem>().Any(item => item.Enabled))
+            selectionMenu.Show(anchor, location);
+    }
+
+    private void UpdateMenuActions(PaneSelection selection)
+    {
+        for (int i = 0; i < actions.Length; i++)
+        {
+            var action = actions[i];
+            var item = selectionMenu.Items[i];
+            item.Enabled = action.CanExecute(selection);
+            item.Image = DarkTheme.MenuIcon(action.Button, Pixels(16));
+        }
+    }
+
+    private static bool IsMenuKey(KeyEventArgs e) => e.KeyCode == Keys.Apps || (e.KeyCode == Keys.F10 && e.Shift);
+
+    private static ContextMenuStrip CreateMenu(bool showIcons) => new()
+    {
+        BackColor = DarkTheme.Panel, ForeColor = DarkTheme.Ink, Font = DarkTheme.Small,
+        ShowImageMargin = showIcons, ShowItemToolTips = true,
+        Renderer = new ToolStripProfessionalRenderer(new BrowserMenuColors())
+    };
 
     private void ShowRecent()
     {
@@ -396,19 +506,27 @@ internal sealed class BrowserPane : UserControl
         var names = directories.Select(entry => entry.Name).ToHashSet(StringComparer.Ordinal);
         foreach (TreeNode stale in node.Nodes.Cast<TreeNode>().Where(child => child.Tag is not string || !names.Contains(child.Name)).ToArray())
             node.Nodes.Remove(stale);
-        var existing = node.Nodes.Cast<TreeNode>().Select(child => child.Name).ToHashSet(StringComparer.Ordinal);
+        if (!local && node is FolderNode current)
+            current.Entry = current.Entry with { HasSubfolders = directories.Length > 0 };
+        var existing = node.Nodes.OfType<FolderNode>().ToDictionary(child => child.Name, StringComparer.Ordinal);
         for (int i = 0; i < directories.Length; i++)
         {
             var entry = directories[i];
-            if (existing.Contains(entry.Name))
+            if (existing.TryGetValue(entry.Name, out var known))
+            {
+                known.Entry = entry.HasSubfolders is null && known.Nodes.Count > 0 && known.Nodes[0].Tag is string
+                    ? entry with { HasSubfolders = true } : entry;
                 continue;
+            }
             string parent = (string)node.Tag!;
             string childPath = local ? Path.Combine(parent, entry.Name) : ArchiveSession.Child(parent, entry.Name);
-            var child = new TreeNode(entry.Name) { Name = entry.Name, Tag = childPath, ToolTipText = entry.Name };
+            var child = new FolderNode(entry) { Name = entry.Name, Tag = childPath, ToolTipText = entry.Name };
             child.Nodes.Add("Loading…");
             node.Nodes.Insert(i, child);
         }
     }
+
+    public void ForgetFolder(string directory, string name) => Find(folders.Nodes, directory)?.Nodes.RemoveByKey(name);
 
     public void RestoreLocation()
     {
@@ -537,6 +655,9 @@ internal sealed class BrowserPane : UserControl
             return;
         for (int i = 0; i < entries.Count; i++)
             entries[i] = apply(entries[i]);
+        if (Current is { } node)
+            foreach (var child in node.Nodes.OfType<FolderNode>())
+                child.Entry = apply(child.Entry);
         foreach (ListViewItem row in files.Items)
         {
             var original = (ArchiveEntry)row.Tag!;
@@ -576,6 +697,7 @@ internal sealed class BrowserPane : UserControl
         {
             icons.Dispose();
             recentMenu.Dispose();
+            selectionMenu.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -587,6 +709,14 @@ internal sealed class BrowserPane : UserControl
 
     private sealed class FixedTreeView : TreeView
     {
+        public event Action<Point>? ContextClick;
+
+        protected override void WndProc(ref Message message)
+        {
+            if (!HandleContextMouse(message, ContextClick))
+                base.WndProc(ref message);
+        }
+
         protected override CreateParams CreateParams
         {
             get
@@ -599,7 +729,39 @@ internal sealed class BrowserPane : UserControl
         }
     }
 
-    private sealed class RecentMenuColors : ProfessionalColorTable
+    private sealed class ContextListView : ListView
+    {
+        public event Action<Point>? ContextClick;
+
+        protected override void WndProc(ref Message message)
+        {
+            if (!HandleContextMouse(message, ContextClick))
+                base.WndProc(ref message);
+        }
+    }
+
+    private static bool HandleContextMouse(Message message, Action<Point>? click)
+    {
+        const int rightDown = 0x0204;
+        const int rightUp = 0x0205;
+        const int rightDoubleClick = 0x0206;
+        if (click is null || message.Msg is not (rightDown or rightUp or rightDoubleClick))
+            return false;
+        if (message.Msg == rightUp)
+        {
+            int position = unchecked((int)message.LParam);
+            click(new Point(unchecked((short)position), unchecked((short)(position >> 16))));
+        }
+        // Context actions select the clicked row explicitly and preserve an existing multi-selection.
+        return true;
+    }
+
+    private sealed class FolderNode(ArchiveEntry entry) : TreeNode(entry.Name)
+    {
+        public ArchiveEntry Entry { get; set; } = entry;
+    }
+
+    private sealed class BrowserMenuColors : ProfessionalColorTable
     {
         public override Color ToolStripDropDownBackground => DarkTheme.Panel;
         public override Color MenuBorder => DarkTheme.Border;

@@ -41,6 +41,57 @@ internal static class DarkTheme
         control.HandleCreated += (_, _) => SetWindowTheme(control.Handle, theme, null);
     }
 
+    public static DialogResult ShowDialog(Form dialog, Form owner)
+    {
+        Size designSize = dialog.ClientSize;
+        dialog.AutoScaleDimensions = DesignDpi;
+        dialog.Load += (_, _) => FitDialog(dialog, owner.Bounds, Screen.FromControl(owner).WorkingArea, designSize);
+        dialog.ResumeLayout(performLayout: false);
+        return dialog.ShowDialog(owner);
+    }
+
+    private static void FitDialog(Form dialog, Rectangle owner, Rectangle available, Size designSize)
+    {
+        float scale = dialog.DeviceDpi / DesignDpi.Width;
+        int margin = (int)Math.Round(8 * scale);
+        available.Inflate(-margin, -margin);
+        Size chrome = dialog.Size - dialog.ClientSize;
+        var contentSize = new Size((int)Math.Round(designSize.Width * scale), (int)Math.Round(designSize.Height * scale));
+        var windowSize = new Size(Math.Min(available.Width, contentSize.Width + chrome.Width),
+            Math.Min(available.Height, contentSize.Height + chrome.Height));
+        if (dialog.Controls[0] is TableLayoutPanel layout &&
+            (windowSize.Width < contentSize.Width + chrome.Width || windowSize.Height < contentSize.Height + chrome.Height))
+        {
+            var scroll = new Panel { AutoScroll = true, Dock = DockStyle.Fill };
+            int last = layout.RowCount - 1;
+            if (layout.GetControlFromPosition(0, last) is FlowLayoutPanel buttons)
+            {
+                int footerWidth = Math.Max(1, windowSize.Width - chrome.Width - layout.Padding.Horizontal);
+                int footerHeight = buttons.GetPreferredSize(new Size(footerWidth, int.MaxValue)).Height +
+                    buttons.Margin.Vertical + layout.Padding.Bottom;
+                layout.Controls.Remove(buttons);
+                layout.RowCount--;
+                layout.RowStyles.RemoveAt(last);
+                contentSize.Height -= footerHeight;
+                buttons.Dock = DockStyle.Fill;
+                var footer = new Panel { Dock = DockStyle.Bottom, Height = footerHeight, Padding = layout.Padding with { Top = 0 } };
+                footer.Controls.Add(buttons);
+                dialog.Controls.Add(footer);
+            }
+            layout.Dock = DockStyle.None;
+            layout.Location = Point.Empty;
+            layout.Size = contentSize;
+            scroll.Controls.Add(layout);
+            scroll.AutoScrollMinSize = contentSize;
+            dialog.Controls.Add(scroll);
+            scroll.BringToFront();
+        }
+        dialog.Bounds = new Rectangle(
+            Math.Clamp(owner.Left + (owner.Width - windowSize.Width) / 2, available.Left, available.Right - windowSize.Width),
+            Math.Clamp(owner.Top + (owner.Height - windowSize.Height) / 2, available.Top, available.Bottom - windowSize.Height),
+            windowSize.Width, windowSize.Height);
+    }
+
     public static TextBox Input(string caption = "") => new()
     {
         BackColor = Page, ForeColor = Ink, BorderStyle = BorderStyle.FixedSingle,
@@ -68,6 +119,9 @@ internal static class DarkTheme
         if (button is DarkButton styled)
             styled.SetIcon(icon);
     }
+
+    public static Image? MenuIcon(Button button, int size) =>
+        button is DarkButton styled ? ActionIcons.Get(styled.Icon, Ink, size) : button.Image;
 
     public static FlowLayoutPanel Row(params Control[] controls)
     {
@@ -111,6 +165,7 @@ internal static class DarkTheme
         private readonly bool primary;
         private bool hovered;
         private ActionIcon icon;
+        public ActionIcon Icon => icon;
 
         public DarkButton(ActionIcon icon, bool primary)
         {
