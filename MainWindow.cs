@@ -8,8 +8,10 @@ internal sealed class MainWindow : Form
     private readonly SessionLog? sessionLog;
     private readonly ArchiveQueue archiveQueue = new();
     private readonly ArchiveQueuePanel queuePanel = new();
+    private readonly RowStyle actionHeight = new(SizeType.Absolute, 35);
     private readonly RowStyle queueHeight = new(SizeType.Absolute, ArchiveQueuePanel.EmptyHeight);
     private readonly RowStyle activityHeight = new(SizeType.Absolute, TransferLog.DisplayHeight);
+    private readonly RowStyle statusHeight = new(SizeType.Absolute, 32);
     private readonly Button upload = DarkTheme.Button("Upload to SURF", ActionIcon.Upload, primary: true);
     private readonly Button download = DarkTheme.Button("Download", ActionIcon.Download, primary: true);
     private readonly Button restore = DarkTheme.Button("Restore from tape", ActionIcon.Tape);
@@ -41,21 +43,23 @@ internal sealed class MainWindow : Form
     private bool transferring;
     private bool editingSurf;
     private bool editingLocal;
+    private bool panelResizePending;
     private bool closeWhenIdle;
     private string feedbackMessage = "";
     private bool feedbackIsError;
 
-    public MainWindow(ArchiveSession? session, SessionLog? sessionLog = null)
+    public MainWindow(ArchiveSession? session, SessionLog? sessionLog = null, Screen? startupScreen = null)
     {
         archive = session;
         this.sessionLog = sessionLog;
         transfers = new(sessionLog);
+        SuspendLayout();
         DarkTheme.Window(this);
         Text = session is null ? "SurfDataArchiveTransfer"
             : $"SurfDataArchiveTransfer · SFTP connected · {ArchiveSession.Host}";
-        MinimumSize = new Size(1040, 660);
-        ClientSize = new Size(1410, 850);
-        StartPosition = FormStartPosition.CenterScreen;
+        Rectangle workArea = (startupScreen ?? Screen.FromPoint(Cursor.Position)).WorkingArea;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = workArea;
         BuildLayout();
         scanTimer.Tick += (_, _) => RefreshScanStatus();
         RefreshScanStatus();
@@ -94,6 +98,12 @@ internal sealed class MainWindow : Form
         transfers.HorizontalScrollbarChanged += (_, _) => SchedulePanelResize();
         queuePanel.HorizontalScrollbarChanged += (_, _) => SchedulePanelResize();
         SizeChanged += (_, _) => SchedulePanelResize();
+        Load += (_, _) =>
+        {
+            Bounds = StartupBounds(workArea);
+            FitToScreen();
+        };
+        DpiChanged += (_, _) => BeginInvoke(FitToScreen);
         archiveQueue.Changed += () =>
         {
             LogQueueChanges();
@@ -121,38 +131,75 @@ internal sealed class MainWindow : Form
             archive?.Dispose();
         };
         UpdateControls();
+        AutoScaleDimensions = DarkTheme.DesignDpi;
+        ResumeLayout(performLayout: false);
     }
 
     private void SchedulePanelResize()
     {
         // Scrollbar visibility can change while the grid is laying out its rows.
-        if (IsHandleCreated && !IsDisposed)
-            BeginInvoke(FitActivityPanels);
+        if (!IsHandleCreated || IsDisposed || panelResizePending)
+            return;
+        panelResizePending = true;
+        BeginInvoke(() =>
+        {
+            panelResizePending = false;
+            FitActivityPanels();
+        });
     }
 
     private void FitActivityPanels()
     {
-        if (IsDisposed)
+        if (IsDisposed || transfers.Parent is not TableLayoutPanel layout)
             return;
+        var actions = (TableLayoutPanel)layout.GetControlFromPosition(0, 1)!;
+        int toolbarHeight = actions.Controls.Cast<FlowLayoutPanel>()
+            .Max(toolbar => toolbar.GetPreferredSize(new Size(Math.Max(1, toolbar.Width), int.MaxValue)).Height)
+            + actions.Margin.Vertical;
+        int footerHeight = Math.Max(feedback.PreferredHeight, logs.GetPreferredSize(Size.Empty).Height)
+            + logs.Parent!.Margin.Vertical;
         float scale = DeviceDpi / 96f;
-        float queue = (float)Math.Round(ArchiveQueuePanel.HeightFor(archiveQueue.Items.Count) * scale) +
-            queuePanel.HorizontalScrollbarHeight;
-        float activity = (float)Math.Round(TransferLog.DisplayHeight * scale) + transfers.HorizontalScrollbarHeight;
-        if (queueHeight.Height == queue && activityHeight.Height == activity)
+        int queued = Math.Min(archiveQueue.Items.Count, 4);
+        int activityRows = 4;
+        float queue = queuePanel.HeightFor(queued);
+        float activity = transfers.HeightFor(activityRows);
+        int browserSpace = (int)Math.Round(260 * scale);
+        int usable = ClientSize.Height - browserSpace - queuePanel.Margin.Vertical - transfers.Margin.Vertical -
+            toolbarHeight - footerHeight;
+        while (queue + activity > usable && activityRows > 1)
+            activity = transfers.HeightFor(--activityRows);
+        while (queue + activity > usable && queued > 1)
+            queue = queuePanel.HeightFor(--queued);
+        if (queueHeight.Height == queue && activityHeight.Height == activity &&
+            actionHeight.Height == toolbarHeight && statusHeight.Height == footerHeight)
             return;
+        actionHeight.Height = toolbarHeight;
         queueHeight.Height = queue;
         activityHeight.Height = activity;
-        transfers.Parent?.PerformLayout();
+        statusHeight.Height = footerHeight;
+        layout.PerformLayout();
     }
+
+    private void FitToScreen()
+    {
+        Size available = StartupBounds(Screen.FromControl(this).WorkingArea).Size;
+        float scale = DeviceDpi / 96f;
+        MinimumSize = new Size(Math.Min((int)Math.Round(960 * scale), available.Width),
+            Math.Min((int)Math.Round(600 * scale), available.Height));
+        SchedulePanelResize();
+    }
+
+    private static Rectangle StartupBounds(Rectangle workArea) =>
+        Rectangle.Inflate(workArea, -workArea.Width / 8, -workArea.Height / 8);
 
     private void BuildLayout()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
         layout.RowStyles.Add(new(SizeType.Percent, 100));
-        layout.RowStyles.Add(new(SizeType.Absolute, 35));
+        layout.RowStyles.Add(actionHeight);
         layout.RowStyles.Add(queueHeight);
         layout.RowStyles.Add(activityHeight);
-        layout.RowStyles.Add(new(SizeType.Absolute, 32));
+        layout.RowStyles.Add(statusHeight);
         Controls.Add(layout);
 
         var panes = new TableLayoutPanel
@@ -168,8 +215,12 @@ internal sealed class MainWindow : Form
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(13, 5, 13, 1) };
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
         actions.ColumnStyles.Add(new(SizeType.Percent, 50));
-        actions.Controls.Add(DarkTheme.Row(package, upload, removeWindows), 0, 0);
-        actions.Controls.Add(DarkTheme.Row(download, restore, newFolder, removeSurf), 1, 0);
+        actions.RowStyles.Add(new(SizeType.Percent, 100));
+        actions.Controls.Add(DarkTheme.Toolbar(package, upload, removeWindows), 0, 0);
+        actions.Controls.Add(DarkTheme.Toolbar(download, restore, newFolder, removeSurf), 1, 0);
+        actions.SizeChanged += (_, _) => SchedulePanelResize();
+        foreach (Control toolbar in actions.Controls)
+            toolbar.Layout += (_, _) => SchedulePanelResize();
         layout.Controls.Add(actions, 0, 1);
 
         queuePanel.Margin = new Padding(13, 0, 13, 4);
@@ -192,6 +243,9 @@ internal sealed class MainWindow : Form
         logs.Margin = new Padding(8, 0, 0, 0);
         statusBar.Controls.Add(feedback, 0, 0);
         statusBar.Controls.Add(logs, 1, 0);
+        statusBar.SizeChanged += (_, _) => SchedulePanelResize();
+        logs.FontChanged += (_, _) => SchedulePanelResize();
+        feedback.FontChanged += (_, _) => SchedulePanelResize();
         layout.Controls.Add(statusBar, 0, 4);
     }
 

@@ -218,7 +218,7 @@ internal sealed class TransferLog : UserControl
         add => jobs.HorizontalScrollbarChanged += value;
         remove => jobs.HorizontalScrollbarChanged -= value;
     }
-    public int HorizontalScrollbarHeight => jobs.HorizontalScrollbarHeight;
+    public int HeightFor(int rows) => (int)Math.Round((16 + HeadingHeight + 6) * DeviceDpi / 96f) + jobs.HeightFor(rows);
     public TransferJob? SelectedJob => jobs.CurrentRow?.Tag as TransferJob;
 
     public void Add(TransferJob job)

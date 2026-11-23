@@ -4,7 +4,7 @@ Windows x64 file manager for SURF Data Archive. Browse local drives and network 
 
 [Quick start for new users](https://cellular-imaging-amsterdam-umc.github.io/archief_to_surfarchive/)
 
-After sign-in, both panes reopen their last visited folders when available. Otherwise, Local / NAS starts at `L:\` and the SURF pane opens your archive home. The location menu also has shortcuts to `L:\basic` and `L:\Archief\active`.
+After sign-in, the main window opens centered at about 75% of the available screen width and height. The layout follows that monitor's Windows display scaling. Both panes reopen their last visited folders when available. Otherwise, Local / NAS starts at `L:\` and the SURF pane opens your archive home. The location menu also has shortcuts to `L:\basic` and `L:\Archief\active`.
 
 1. Open **SurfDataArchiveTransfer.exe** and sign in with a SURF Data Archive account. **Remember username** saves the username locally. Enter the password each time you sign in.
 2. **Archive to SURF** is the usual upload action. **Upload to SURF** is available for direct copies only when every selected item is a file strictly larger than 100 MB. It always asks for confirmation. Use **Recent** in either pane to reopen a visited folder. You can also enter a folder or UNC path in the Local / NAS path field.

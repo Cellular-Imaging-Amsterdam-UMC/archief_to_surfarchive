@@ -51,8 +51,11 @@ internal sealed class BrowserPane : UserControl
         AccessibleName = heading;
 
         var panel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = Padding.Empty };
-        foreach (int height in new[] { 27, 32, 28, -1, 22 })
-            panel.RowStyles.Add(new(height < 0 ? SizeType.Percent : SizeType.Absolute, height < 0 ? 100 : height));
+        panel.RowStyles.Add(new(SizeType.AutoSize));
+        panel.RowStyles.Add(new(SizeType.AutoSize));
+        panel.RowStyles.Add(new(SizeType.AutoSize));
+        panel.RowStyles.Add(new(SizeType.Percent, 100));
+        panel.RowStyles.Add(new(SizeType.AutoSize));
         Controls.Add(panel);
         panel.Controls.Add(DarkTheme.Label(heading, DarkTheme.Heading), 0, 0);
 
@@ -69,8 +72,10 @@ internal sealed class BrowserPane : UserControl
             CellText(e.Graphics, label, e.Bounds, DarkTheme.Ink, 0);
         };
         storage.Margin = new Padding(0, 6, 13, 0);
-        panel.Controls.Add(local ? DarkTheme.Row(locations, up, reload, recent)
-            : DarkTheme.Row(up, reload, recent, storage), 0, 1);
+        var toolbar = local ? DarkTheme.Toolbar(locations, up, reload, recent)
+            : DarkTheme.Toolbar(up, reload, recent, storage);
+        toolbar.Margin = new Padding(0, 3, 0, 4);
+        panel.Controls.Add(toolbar, 0, 1);
 
         address.Dock = DockStyle.Top;
         address.Margin = Padding.Empty;
@@ -85,6 +90,10 @@ internal sealed class BrowserPane : UserControl
         split.Panel1.BackColor = split.Panel2.BackColor = DarkTheme.Page;
         split.Panel1.Controls.Add(TreeLayout());
         split.Panel2.Controls.Add(FileLayout());
+        HandleCreated += (_, _) => FitBrowserDpi();
+        DpiChangedAfterParent += (_, _) => FitBrowserDpi();
+        folders.FontChanged += (_, _) => FitBrowserDpi();
+        locations.FontChanged += (_, _) => FitBrowserDpi();
         split.Layout += (_, _) =>
         {
             if (!firstLayout || split.ClientSize.Width < 330)
@@ -196,7 +205,7 @@ internal sealed class BrowserPane : UserControl
     private Control TreeLayout()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Padding = new Padding(5) };
-        layout.RowStyles.Add(new(SizeType.Absolute, 22));
+        layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
         layout.Controls.Add(DarkTheme.Label("FOLDERS", DarkTheme.Small, DarkTheme.Muted), 0, 0);
         layout.Controls.Add(folders, 0, 1);
@@ -219,20 +228,20 @@ internal sealed class BrowserPane : UserControl
             var area = new Rectangle(0, e.Bounds.Y, folders.ClientSize.Width, e.Bounds.Height);
             using var fill = new SolidBrush(background);
             e.Graphics.FillRectangle(fill, area);
-            int textLeft = Math.Max(34, node.Bounds.Left);
+            int textLeft = Math.Max(Pixels(34), node.Bounds.Left);
             if (textLeft >= area.Right)
                 return;
             int middle = area.Top + area.Height / 2;
             if (node.Nodes.Count > 0)
             {
-                int x = textLeft - 30;
+                int x = textLeft - Pixels(30);
                 using var pen = new Pen(DarkTheme.Muted, 1.4f);
                 Point[] points = node.IsExpanded
                     ? [new(x - 3, middle - 1), new(x, middle + 2), new(x + 3, middle - 1)]
                     : [new(x - 1, middle - 3), new(x + 2, middle), new(x - 1, middle + 3)];
                 e.Graphics.DrawLines(pen, points);
             }
-            DarkTheme.DrawIcon(e.Graphics, new Rectangle(textLeft - 20, middle - 8, 16, 16), folder: true);
+            DarkTheme.DrawIcon(e.Graphics, new Rectangle(textLeft - Pixels(20), middle - 8, 16, 16), folder: true);
             CellText(e.Graphics, node.Text, new Rectangle(textLeft, area.Y, area.Right - textLeft, area.Height),
                 DarkTheme.Ink, 0);
         };
@@ -242,7 +251,7 @@ internal sealed class BrowserPane : UserControl
     private Control FileLayout()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Padding = new Padding(5) };
-        layout.RowStyles.Add(new(SizeType.Absolute, 30));
+        layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
         filter.Dock = DockStyle.Top;
         filter.PlaceholderText = "Filter by name";
@@ -486,16 +495,24 @@ internal sealed class BrowserPane : UserControl
     private void FitFileColumns()
     {
         int width = files.ClientSize.Width;
-        if (width < 240)
+        if (width <= 0)
             return;
+        files.Columns[1].Width = Math.Clamp(width * 15 / 100, Pixels(49), Pixels(74));
+        files.Columns[2].Width = Math.Clamp(width * 24 / 100, Pixels(75), Pixels(125));
         if (!local)
-        {
-            files.Columns[1].Width = Math.Clamp(width * 15 / 100, 49, 70);
-            files.Columns[2].Width = Math.Clamp(width * 24 / 100, 75, 120);
-            files.Columns[3].Width = Math.Clamp(width * 26 / 100, 76, 125);
-        }
-        files.Columns[0].Width = Math.Max(65, width - files.Columns.Cast<ColumnHeader>().Skip(1).Sum(column => column.Width));
+            files.Columns[3].Width = Math.Clamp(width * 26 / 100, Pixels(76), Pixels(132));
+        files.Columns[0].Width = Math.Max(Pixels(65), width - files.Columns.Cast<ColumnHeader>().Skip(1).Sum(column => column.Width));
     }
+
+    private void FitBrowserDpi()
+    {
+        folders.ItemHeight = Math.Max(Pixels(23), folders.Font.Height + Pixels(4));
+        folders.Indent = Pixels(16);
+        locations.ItemHeight = Math.Max(Pixels(18), locations.Font.Height + Pixels(2));
+        FitFileColumns();
+    }
+
+    private int Pixels(int units) => (int)Math.Round(units * DeviceDpi / 96f);
 
     public void ApplyStatuses(IReadOnlyDictionary<string, ArchiveState> states, bool finish)
     {

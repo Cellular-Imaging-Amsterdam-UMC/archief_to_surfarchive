@@ -17,6 +17,7 @@ internal sealed class LogWindow : Form
     public LogWindow(SessionLog? session)
     {
         this.session = session;
+        SuspendLayout();
         DarkTheme.Window(this);
         Text = "Logs";
         StartPosition = FormStartPosition.CenterParent;
@@ -67,6 +68,8 @@ internal sealed class LogWindow : Form
                 refresh.Start();
         };
         refresh.Tick += async (_, _) => await RefreshFiles();
+        AutoScaleDimensions = DarkTheme.DesignDpi;
+        ResumeLayout(performLayout: false);
     }
 
     private async Task RefreshFiles()

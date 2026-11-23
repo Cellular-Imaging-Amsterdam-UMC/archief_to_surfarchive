@@ -4,6 +4,7 @@ internal sealed class ActivityGrid : DataGridView
 {
     public const int ItemHeight = 26;
     public const int HeaderHeight = 27;
+    private readonly Dictionary<DataGridViewColumn, (int Width, int Minimum)> columnsAt96Dpi = [];
     public int HorizontalScrollbarHeight => HorizontalScrollBar.Visible ? HorizontalScrollBar.Height : 0;
     public event EventHandler? HorizontalScrollbarChanged
     {
@@ -45,17 +46,63 @@ internal sealed class ActivityGrid : DataGridView
             Padding = new Padding(5, 0, 5, 0)
         };
         DoubleBuffered = true;
+        FontChanged += (_, _) => FitDpi();
         DarkTheme.Explorer(VerticalScrollBar);
         DarkTheme.Explorer(HorizontalScrollBar);
     }
 
+    public int HeightFor(int rows) => ColumnHeadersHeight + rows * RowTemplate.Height + HorizontalScrollbarHeight;
+
     public void AddTextColumn(string title, int width, bool fill = false) =>
-        Columns.Add(new DataGridViewTextBoxColumn
+        AddScaledColumn(new DataGridViewTextBoxColumn
         {
-            HeaderText = title, Width = width, MinimumWidth = fill ? 130 : 45,
+            HeaderText = title,
             AutoSizeMode = fill ? DataGridViewAutoSizeColumnMode.Fill : DataGridViewAutoSizeColumnMode.None,
             SortMode = DataGridViewColumnSortMode.NotSortable
-        });
+        }, width, fill ? 130 : 45);
+
+    public void AddActionColumn() => AddScaledColumn(new DataGridViewImageColumn
+    {
+        Resizable = DataGridViewTriState.False,
+        DefaultCellStyle = new DataGridViewCellStyle { NullValue = null, Padding = Padding.Empty }
+    }, 34, 34);
+
+    private void AddScaledColumn(DataGridViewColumn column, int width, int minimum)
+    {
+        columnsAt96Dpi.Add(column, (width, minimum));
+        column.MinimumWidth = Pixels(minimum);
+        column.Width = Pixels(width);
+        Columns.Add(column);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        FitDpi();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        FitDpi();
+    }
+
+    private void FitDpi()
+    {
+        int textHeight = TextRenderer.MeasureText("Ag", Font).Height;
+        ColumnHeadersHeight = Math.Max(Pixels(HeaderHeight), textHeight + Pixels(6));
+        RowTemplate.Height = Math.Max(Pixels(ItemHeight), textHeight + Pixels(4));
+        foreach (DataGridViewRow row in Rows)
+            row.Height = RowTemplate.Height;
+        foreach (var (column, size) in columnsAt96Dpi)
+        {
+            column.MinimumWidth = Pixels(size.Minimum);
+            if (column.AutoSizeMode != DataGridViewAutoSizeColumnMode.Fill)
+                column.Width = Pixels(size.Width);
+        }
+    }
+
+    private int Pixels(int units) => (int)Math.Round(units * DeviceDpi / 96f);
 
     public void AddProgressColumn(int width)
     {

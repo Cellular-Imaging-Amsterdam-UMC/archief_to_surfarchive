@@ -4,6 +4,7 @@ namespace SurfArchive;
 
 internal static class DarkTheme
 {
+    public static readonly SizeF DesignDpi = new(96, 96);
     public static readonly Color Page = Color.FromArgb(18, 23, 31);
     public static readonly Color Panel = Color.FromArgb(24, 31, 41);
     public static readonly Color Raised = Color.FromArgb(31, 41, 54);
@@ -78,6 +79,15 @@ internal static class DarkTheme
         return panel;
     }
 
+    public static FlowLayoutPanel Toolbar(params Control[] controls)
+    {
+        var row = Row(controls);
+        row.AutoSize = true;
+        row.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        row.WrapContents = true;
+        return row;
+    }
+
     public static void DrawIcon(Graphics g, Rectangle box, bool folder)
     {
         if (folder)
@@ -123,7 +133,11 @@ internal static class DarkTheme
         public override Size GetPreferredSize(Size proposedSize)
         {
             var size = base.GetPreferredSize(proposedSize);
-            return AutoSize ? new Size(size.Width, DeviceDpi * 26 / 96) : size;
+            if (!AutoSize)
+                return size;
+            int contentHeight = Math.Max(Font.Height, Image?.Height ?? 0);
+            int height = Math.Max(DeviceDpi * 26 / 96, contentHeight + DeviceDpi * 6 / 96);
+            return new Size(size.Width, height);
         }
 
         public void SetIcon(ActionIcon value)

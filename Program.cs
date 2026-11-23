@@ -14,6 +14,7 @@ internal static class Program
         log.Write($"SurfDataArchiveTransfer {typeof(Program).Assembly.GetName().Version} started.");
 
         ArchiveSession session;
+        Screen screen;
         using (var login = new LoginDialog(log))
         {
             if (login.ShowDialog() != DialogResult.OK)
@@ -22,6 +23,7 @@ internal static class Program
                 return 0;
             }
             session = login.TakeSession();
+            screen = Screen.FromRectangle(login.Bounds);
         }
 
         if (args is ["--proef" or "--probe", var source, var logPath])
@@ -29,7 +31,7 @@ internal static class Program
             using (session)
                 return RunProbe(session, source, logPath, log);
         }
-        Application.Run(new MainWindow(session, log));
+        Application.Run(new MainWindow(session, log, screen));
         log.Write("App closed.");
         return 0;
     }

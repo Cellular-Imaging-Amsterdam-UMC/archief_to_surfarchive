@@ -18,6 +18,7 @@ internal sealed class LoginDialog : Form
     public LoginDialog(SessionLog? log = null)
     {
         this.log = log;
+        SuspendLayout();
         DarkTheme.Window(this);
         Text = "Sign in · SURF Data Archive";
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -85,6 +86,8 @@ internal sealed class LoginDialog : Form
             if (DialogResult != DialogResult.OK)
                 session?.Dispose();
         };
+        AutoScaleDimensions = DarkTheme.DesignDpi;
+        ResumeLayout(performLayout: false);
     }
 
     private async Task Connect()

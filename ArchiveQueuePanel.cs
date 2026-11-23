@@ -50,8 +50,8 @@ internal sealed class ArchiveQueuePanel : UserControl
         jobs.AddTextColumn("Status", 121);
         jobs.AddProgressColumn(131);
         jobs.AddTextColumn("Total time", 90);
-        AddActionColumn();
-        AddActionColumn();
+        jobs.AddActionColumn();
+        jobs.AddActionColumn();
         jobs.CellMouseClick += (_, e) =>
         {
             if (e.Button == MouseButtons.Left)
@@ -93,12 +93,13 @@ internal sealed class ArchiveQueuePanel : UserControl
         remove => jobs.HorizontalScrollbarChanged -= value;
     }
 
-    public int HorizontalScrollbarHeight => jobs.HorizontalScrollbarHeight;
-
     public void TrackDirectUpload(TransferJob? job) => directUpload = job;
 
-    public static int HeightFor(int count) => count == 0 ? EmptyHeight
-        : EmptyHeight + ActivityGrid.HeaderHeight + ActivityGrid.ItemHeight * Math.Min(count, 4) + 6;
+    public int HeightFor(int rows)
+    {
+        int header = (int)Math.Round(EmptyHeight * DeviceDpi / 96f);
+        return rows == 0 ? header : header + jobs.HeightFor(rows) + (int)Math.Round(6 * DeviceDpi / 96f);
+    }
 
     public void SetRecoveryAvailable(bool available)
     {
@@ -173,13 +174,6 @@ internal sealed class ArchiveQueuePanel : UserControl
 
     private static string FormatElapsed(ArchiveQueueItem item) =>
         item.Progress is { } progress ? TransferJob.FormatTime(progress.CurrentElapsed) : "—";
-
-    private void AddActionColumn() => jobs.Columns.Add(new DataGridViewImageColumn
-    {
-        Width = 34,
-        Resizable = DataGridViewTriState.False,
-        DefaultCellStyle = new DataGridViewCellStyle { NullValue = null, Padding = Padding.Empty }
-    });
 
     private void SetRecoveryAction(DataGridViewRow row) =>
         SetAction(row, RunColumn, ActionIcon.Recovery,
